@@ -9,7 +9,7 @@ import os
 
 import pandas as pd
 
-from config.checkpoint import safe_write_file
+# from config.checkpoint import safe_write_file
 from leyp_config import (
     ACTION_EMERGENCY_REPLACEMENT,
     ANNUAL_BUDGET,

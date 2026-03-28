@@ -3,7 +3,7 @@ import pandas as pd
 # ==========================================
 # 1. FILE & COLUMN MAPPING
 # ==========================================
-REAL_DATA_PATH = "Louisa_LEYP_Input_csv.csv"
+REAL_DATA_PATH = "Louisa_wConduits_Input_CSV.csv"
 SIMULATION_START_YEAR = 2025
 
 COLUMN_MAP = {
@@ -32,6 +32,7 @@ MATERIAL_PROPS = {
     "HDPE": {"beta": 1.0, "eta": 120, "base_mult": 0.6},
     "Steel": {"beta": 1.4, "eta": 80, "base_mult": 1.1},
     "Default": {"beta": 1.3, "eta": 85, "base_mult": 1.0},
+    "GI": {"beta": 2.2, "eta": 45, "base_multi": 1.75},
 }
 COEFF_DIAMETER = -0.02
 
@@ -48,6 +49,7 @@ DEGRADATION_PARAMS = {
     "HDPE": {"ttf_mean": 100, "ttf_std": 15},
     "Steel": {"ttf_mean": 65, "ttf_std": 25},
     "Default": {"ttf_mean": 70, "ttf_std": 20},
+    "GI": {"ttf_mean": 40, "ttf_std": 15},
 }
 
 # ==========================================
@@ -63,6 +65,7 @@ STANDARD_LIFE = {
     "HDPE": {"base_life": 150, "min_life": 120, "max_life": 200},
     "Steel": {"base_life": 80, "min_life": 60, "max_life": 100},
     "Default": {"base_life": 85, "min_life": 70, "max_life": 100},
+    "GI": {"base_life": 50, "min_life": 40, "max_life": 60},
 }
 
 # ==========================================
