@@ -9,16 +9,19 @@ import os
 
 import pandas as pd
 
-# from config.checkpoint import safe_write_file
+from checkpoint import safe_write_file
 from leyp_config import (
+    ACTION_BREAK_EVENT,
     ACTION_EMERGENCY_REPLACEMENT,
     ANNUAL_BUDGET,
     COLUMN_MAP,
+    DEFAULT_REPLACEMENT_MATERIAL,
     EMERGENCY_REPLACEMENT_COST_PER_FT,
+    N_SEGMENTS_PER_PIPE,
     SIMULATION_YEARS,
     TRIGGERS,
 )
-from leyp_core import Pipe
+from leyp_core import Pipe, VirtualSegment
 from water_replacement import ReplacementManager
 
 
@@ -69,50 +72,119 @@ def run_simulation(
     cip_cost = 0.0  # Planned CIP replacements
     repair_cost = 0.0  # Emergency repairs (per-break costs)
     emergency_cost = 0.0  # Emergency replacements (failed pipe costs)
+    total_breaks = 0  # Cumulative break events across all pipes
 
-    all_actions = []  # Action log combining CIP and emergency actions
+    all_actions = []  # Action log combining CIP, emergency, and break events
+
+    # Track pipes already at failure condition from initialization (B4).
+    # These are pre-existing failures the utility inherited — they should
+    # not be charged emergency replacement cost at simulation start.
+    initially_dead = {pipe.id for pipe in network if pipe.current_condition <= 1.001}
+
+    def _emergency_replace(pipe, year):
+        """Charge emergency replacement cost and reset pipe to new state.
+
+        Mirrors the CIP replacement reset in ReplacementManager.execute_replacement
+        so that emergency-replaced pipes re-enter the simulation as new HDPE pipes.
+        """
+        nonlocal emergency_cost
+
+        cost = pipe.length * EMERGENCY_REPLACEMENT_COST_PER_FT
+        emergency_cost += cost
+
+        # Capture pre-replacement state for logging
+        pre_condition = pipe.current_condition
+        original_material = pipe.material
+
+        all_actions.append(
+            {
+                "Year": year,
+                "PipeID": pipe.id,
+                "Action": ACTION_EMERGENCY_REPLACEMENT,
+                "PreCondition": pre_condition,
+                "PostCondition": 6.0,
+                "Condition_Before": pre_condition,
+                "Priority": 0.0,
+                "Cost": cost,
+                "Length": pipe.length,
+                "Diameter": pipe.diameter,
+                "Material": original_material,
+                "NewMaterial": DEFAULT_REPLACEMENT_MATERIAL,
+            }
+        )
+
+        # --- Reset pipe state (mirrors CIP replacement) ---
+        pipe.current_condition = 6.0
+        pipe.material = DEFAULT_REPLACEMENT_MATERIAL
+        pipe.initial_age = -year
+        pipe.has_failed_in_sim = False
+
+        seg_len = pipe.length / N_SEGMENTS_PER_PIPE
+        pipe.segments = [
+            VirtualSegment(seg_len) for _ in range(N_SEGMENTS_PER_PIPE)
+        ]
+
+        pipe.reset_physics_params()
+        pipe.update_leyp_state()
+
+        # If the pipe was in the initially_dead set and was later
+        # CIP-replaced, then degraded back to failure, it IS a new
+        # simulation event — remove from the bypass set.
+        initially_dead.discard(pipe.id)
 
     for year in range(1, SIMULATION_YEARS + 1):
-        # 1. DEGRADE - Apply natural aging to all pipes
+        # 1. DEGRADE — apply natural aging, catch degradation-caused failures
         for pipe in network:
+            if pipe.current_condition <= 1.001:
+                continue  # Already dead — no degradation to apply
+
             pipe.degrade()
 
-        # 2. PLANNED CIP REPLACEMENT - Execute budget-constrained replacements
+            # Degradation brought pipe below failure threshold
+            if pipe.current_condition <= 1.001:
+                _emergency_replace(pipe, year)
+
+        # 2. PLANNED CIP REPLACEMENT — budget-constrained proactive replacements
         cip_report = replacement_manager.run_year(network, year)
         cip_cost += cip_report["Spend"]
 
         # 3. BREAK SIMULATION AND EMERGENCY RESPONSE
         for pipe in network:
-            # Only simulate breaks for non-failed pipes
-            if pipe.current_condition > 1.001:
-                sim_result = pipe.simulate_year(year)
+            if pipe.current_condition <= 1.001:
+                # Skip pipes at failure condition. Pre-existing failures
+                # (initially_dead) are left in place until B2/B4 is fixed.
+                continue
 
-                # Add emergency repair costs
-                repair_cost += sim_result["repair_cost"]
+            pre_break_condition = pipe.current_condition
+            sim_result = pipe.simulate_year(year)
 
-                # Handle pipe failure from breaks or degradation
-                if sim_result["failed"] or pipe.current_condition <= 1.001:
-                    # Emergency replacement cost
-                    emergency_replacement_cost = pipe.length * EMERGENCY_REPLACEMENT_COST_PER_FT
-                    emergency_cost += emergency_replacement_cost
+            # Accumulate emergency repair costs for individual breaks
+            repair_cost += sim_result["repair_cost"]
 
-                    # Log emergency replacement action
-                    all_actions.append(
-                        {
-                            "Year": year,
-                            "PipeID": pipe.id,
-                            "Action": ACTION_EMERGENCY_REPLACEMENT,
-                            "PreCondition": pipe.current_condition,
-                            "PostCondition": 1.0,  # Emergency replacement leaves pipe at failure state
-                            "Condition_Before": pipe.current_condition,  # Alias for validator compatibility
-                            "Priority": 0.0,  # Emergency actions have no priority ranking
-                            "Cost": emergency_replacement_cost,
-                            "Length": pipe.length,
-                            "Diameter": pipe.diameter,
-                            "Material": pipe.material,
-                            "NewMaterial": None,  # Emergency replacements don't specify new material
-                        }
-                    )
+            # Log break events (B5 fix: make breaks visible in action log)
+            if sim_result["breaks"] > 0:
+                total_breaks += sim_result["breaks"]
+                all_actions.append(
+                    {
+                        "Year": year,
+                        "PipeID": pipe.id,
+                        "Action": ACTION_BREAK_EVENT,
+                        "PreCondition": pre_break_condition,
+                        "PostCondition": pipe.current_condition,
+                        "Condition_Before": pre_break_condition,
+                        "Priority": 0.0,
+                        "Cost": sim_result["repair_cost"],
+                        "Length": pipe.length,
+                        "Diameter": pipe.diameter,
+                        "Material": pipe.material,
+                        "NewMaterial": None,
+                        "Breaks": sim_result["breaks"],
+                    }
+                )
+
+            # Handle pipe failure from break accumulation
+            if sim_result["failed"] or pipe.current_condition <= 1.001:
+                _emergency_replace(pipe, year)
 
     # --- E. COMBINE ACTION LOGS ---
     # Add CIP actions from replacement manager
@@ -136,9 +208,10 @@ def run_simulation(
                 emergency_cost,
                 investment_cost,
                 risk_cost,
+                total_breaks,
             )
 
-        return investment_cost, risk_cost, cip_cost, emergency_cost
+        return investment_cost, risk_cost, cip_cost, emergency_cost, total_breaks
     else:
         return investment_cost, risk_cost
 
@@ -151,18 +224,20 @@ def _generate_reports(
     emergency_cost: float,
     investment_cost: float,
     risk_cost: float,
+    total_breaks: int = 0,
 ) -> None:
     """
     Generate simulation reports using atomic file writes.
 
     Args:
         output_dir: Directory for output files
-        all_actions: Combined list of CIP and emergency actions
+        all_actions: Combined list of CIP, emergency, and break event actions
         cip_cost: Total planned CIP replacement costs
         repair_cost: Total emergency repair costs
         emergency_cost: Total emergency replacement costs
         investment_cost: Total investment (= cip_cost)
         risk_cost: Total risk costs (= repair_cost + emergency_cost)
+        total_breaks: Total break events across all pipes and years
     """
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -170,6 +245,12 @@ def _generate_reports(
     # Generate action log CSV
     if all_actions:
         action_df = pd.DataFrame(all_actions)
+        # Sort chronologically (CIP actions from ReplacementManager are
+        # appended after the simulation loop and land out of order)
+        action_df.sort_values("Year", inplace=True, ignore_index=True)
+        # Fill missing Breaks column for non-break rows
+        if "Breaks" in action_df.columns:
+            action_df["Breaks"] = action_df["Breaks"].fillna(0).astype(int)
         action_csv_path = os.path.join(output_dir, "Optimal_Action_Plan.csv")
         safe_write_file(action_csv_path, action_df.to_csv(index=False))
 
@@ -183,9 +264,104 @@ def _generate_reports(
                 "Total_Investment": investment_cost,
                 "Total_Risk": risk_cost,
                 "Total_Cost": investment_cost + risk_cost,
+                "Total_Breaks": total_breaks,
             }
         ]
     )
 
     summary_csv_path = os.path.join(output_dir, "cost_summary.csv")
     safe_write_file(summary_csv_path, cost_summary.to_csv(index=False))
+
+
+# ============================================================
+# CLI Entry Point
+# ============================================================
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="LEYP-Water single simulation run")
+    parser.add_argument("--input", type=str, default=None,
+                        help="Path to pipe inventory CSV (default: leyp_config.REAL_DATA_PATH)")
+    parser.add_argument("--budget", type=float, default=None,
+                        help="Annual CIP budget in dollars (default: leyp_config.ANNUAL_BUDGET)")
+    parser.add_argument("--trigger", type=float, default=None,
+                        help="Replacement condition trigger (default: leyp_config.TRIGGERS['Rehab'])")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Directory for report output (enables detailed reporting)")
+    args = parser.parse_args()
+
+    generate = args.output_dir is not None
+
+    print("=== LEYP-Water: Single Simulation Run ===")
+    print(f"  Budget:  {args.budget if args.budget else 'default (' + str(ANNUAL_BUDGET) + ')'}")
+    print(f"  Trigger: {args.trigger if args.trigger else 'default (' + str(TRIGGERS['Rehab']) + ')'}")
+    print(f"  Input:   {args.input if args.input else 'default'}")
+    print(f"  Report:  {'→ ' + args.output_dir if generate else 'off (pass --output-dir to enable)'}")
+    print()
+
+    try:
+        result = run_simulation(
+            override_input_path=args.input,
+            annual_budget=args.budget,
+            rehab_trigger=args.trigger,
+            output_dir=args.output_dir,
+            generate_report=generate,
+        )
+
+        if generate:
+            inv, risk, cip, emerg, breaks = result
+            total = inv + risk
+            print(f"\n--- Results (100-year horizon) ---")
+            print(f"  Investment Cost (CIP):      ${inv:>14,.0f}")
+            print(f"  Risk Cost (repairs+emerg):   ${risk:>14,.0f}")
+            print(f"    - Emergency repairs:       ${(risk - emerg):>14,.0f}")
+            print(f"    - Emergency replacements:  ${emerg:>14,.0f}")
+            print(f"  Total Cost:                  ${total:>14,.0f}")
+            print(f"  Total Breaks:                {breaks:>14,d}")
+            if args.output_dir:
+                print(f"\n  Reports written to: {args.output_dir}/")
+
+                # --- Validation Curve ---
+                print("\n--- Generating Validation Curve ---")
+                try:
+                    from water_validation import (
+                        generate_validation_curve,
+                        plot_validation_curve,
+                        save_validation_data,
+                    )
+                    from leyp_config import REAL_DATA_PATH
+
+                    val_input = args.input if args.input else REAL_DATA_PATH
+                    val_budget_max = (args.budget if args.budget else ANNUAL_BUDGET) * 10
+
+                    pct_rn, pct_an, pct_rl, pct_al = generate_validation_curve(
+                        input_file_path=val_input,
+                        budget_min=0,
+                        budget_max=val_budget_max,
+                        n_points=10,
+                    )
+
+                    if pct_rn:  # Non-empty results
+                        plot_path = os.path.join(args.output_dir, "validation_curve.png")
+                        plot_validation_curve(pct_rn, pct_an, pct_rl, pct_al, plot_path)
+
+                        data_path = os.path.join(args.output_dir, "validation_data.csv")
+                        save_validation_data(pct_rn, pct_an, pct_rl, pct_al, data_path)
+                    else:
+                        print("  Validation curve returned empty results.")
+
+                except Exception as e:
+                    print(f"  Error generating validation curve: {e}")
+        else:
+            inv, risk = result
+            total = inv + risk
+            print(f"\n--- Results (100-year horizon) ---")
+            print(f"  Investment Cost: ${inv:>14,.0f}")
+            print(f"  Risk Cost:       ${risk:>14,.0f}")
+            print(f"  Total Cost:      ${total:>14,.0f}")
+            print(f"\n  (pass --output-dir <path> for detailed action log)")
+
+    except Exception as e:
+        print(f"\n[ERROR] Simulation failed: {e}")
+        raise SystemExit(1)

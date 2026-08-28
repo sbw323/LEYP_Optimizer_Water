@@ -4,16 +4,16 @@ import pandas as pd
 # 1. FILE & COLUMN MAPPING
 # ==========================================
 REAL_DATA_PATH = "Louisa_wConduits_Input_CSV.csv"
-SIMULATION_START_YEAR = 2025
+SIMULATION_START_YEAR = 2026
 
 COLUMN_MAP = {
-    "id": "PipeID",
-    "age": "Age",
-    "condition": "Condition",
-    "material": "Material",
-    "diameter": "Diameter",
-    "length": "Length",
-    "cof": "CoF_Value",
+    "PipeID": "PipeID",
+    "Age": "Age",
+    "Condition": "Condition",
+    "Material": "Material",
+    "Diameter": "Diameter",
+    "Length": "Length",
+    "CoF_Value": "CoF_Value",
 }
 
 # ==========================================
@@ -24,7 +24,7 @@ ALPHA = 0.15
 # Weibull Baseline (Water Materials)
 MATERIAL_PROPS = {
     "CI": {"beta": 1.8, "eta": 75, "base_mult": 1.3},
-    "DIP": {"beta": 1.5, "eta": 90, "base_mult": 1.0},
+    "DI": {"beta": 1.5, "eta": 90, "base_mult": 1.0},
     "AC": {"beta": 2.0, "eta": 60, "base_mult": 1.5},
     "PVC": {"beta": 1.1, "eta": 110, "base_mult": 0.7},
     "PCCP": {"beta": 1.6, "eta": 70, "base_mult": 1.2},
@@ -32,7 +32,7 @@ MATERIAL_PROPS = {
     "HDPE": {"beta": 1.0, "eta": 120, "base_mult": 0.6},
     "Steel": {"beta": 1.4, "eta": 80, "base_mult": 1.1},
     "Default": {"beta": 1.3, "eta": 85, "base_mult": 1.0},
-    "GI": {"beta": 2.2, "eta": 45, "base_multi": 1.75},
+    "GI": {"beta": 2.2, "eta": 45, "base_mult": 1.75},
 }
 COEFF_DIAMETER = -0.02
 
@@ -41,7 +41,7 @@ COEFF_DIAMETER = -0.02
 # ==========================================
 DEGRADATION_PARAMS = {
     "CI": {"ttf_mean": 60, "ttf_std": 25},
-    "DIP": {"ttf_mean": 75, "ttf_std": 20},
+    "DI": {"ttf_mean": 75, "ttf_std": 20},
     "AC": {"ttf_mean": 45, "ttf_std": 15},
     "PVC": {"ttf_mean": 90, "ttf_std": 18},
     "PCCP": {"ttf_mean": 55, "ttf_std": 20},
@@ -57,7 +57,7 @@ DEGRADATION_PARAMS = {
 # ==========================================
 STANDARD_LIFE = {
     "CI": {"base_life": 75, "min_life": 50, "max_life": 100},
-    "DIP": {"base_life": 100, "min_life": 80, "max_life": 120},
+    "DI": {"base_life": 100, "min_life": 80, "max_life": 120},
     "AC": {"base_life": 60, "min_life": 40, "max_life": 80},
     "PVC": {"base_life": 120, "min_life": 100, "max_life": 150},
     "PCCP": {"base_life": 75, "min_life": 60, "max_life": 90},
@@ -73,7 +73,7 @@ STANDARD_LIFE = {
 # ==========================================
 N_SEGMENTS_PER_PIPE = 4
 SEGMENT_BREAK_THRESHOLD = 3
-HAZARD_LENGTH_SCALE = 1000.0
+HAZARD_LENGTH_SCALE = 300.0
 SIMULATION_YEARS = 100
 
 # ==========================================
@@ -102,6 +102,7 @@ TRIGGERS = {"Rehab": 2.0}
 # ==========================================
 ACTION_CIP_REPLACEMENT = "CIP_Replacement"
 ACTION_EMERGENCY_REPLACEMENT = "Emergency_Replacement"
+ACTION_BREAK_EVENT = "Break_Event"
 
 # ==========================================
 # 9. CHECKPOINT CONFIGURATION

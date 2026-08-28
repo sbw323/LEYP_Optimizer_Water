@@ -52,7 +52,13 @@ class VirtualSegment:
 
 class Pipe:
     def __init__(self, attributes):
-        """Initialize pipe with age-based condition interpolation and break seeding.
+        """Initialize pipe with condition from age + CSV assessment, and break seeding.
+
+        Condition uses exponential decay on age/base_life ratio so that pipes
+        older than their design life start at low-but-nonzero condition
+        instead of being clamped to 1.0 (which made them invisible to the
+        simulation).  The CSV Condition column acts as a modifier: newer-era
+        pipes (Condition >= 2) receive a condition boost.
 
         Args:
             attributes (dict): Pipe attributes including PipeID, Material, Diameter,
@@ -66,18 +72,35 @@ class Pipe:
 
         self.initial_age = attributes["Age"]
 
-        # Age-based condition initialization
+        # --- Condition initialization (B2/B4 fix) ---
         material_life = STANDARD_LIFE.get(self.material, STANDARD_LIFE["Default"])
         base_life = material_life["base_life"]
-        life_fraction = max(0.0, min(1.0, self.initial_age / base_life))
-        self.current_condition = max(1.0, min(6.0, 6.0 - (5.0 * life_fraction)))
+
+        # life_fraction can exceed 1.0 for pipes older than design life
+        life_fraction = self.initial_age / base_life
+
+        # Exponential decay: approaches 1.0 asymptotically but never reaches it.
+        # At lf=0 → 6.0, lf=1.0 → ~2.12, lf=1.5 → ~1.53, lf=2.0 → ~1.25
+        age_condition = 1.0 + 5.0 * math.exp(-1.5 * life_fraction)
+
+        # CSV condition modifier (B2 fix: use the field assessment data).
+        # In this dataset the column is a binary era indicator:
+        # 1 = older infrastructure (age 46+), 2 = newer additions (age 26).
+        # Condition >= 2 blends the estimate upward toward 6.0.
+        csv_rating = attributes.get("Condition", None)
+        if csv_rating is not None:
+            boost = max(0.0, (float(csv_rating) - 1) * 0.5)
+        else:
+            boost = 0.0
+
+        self.current_condition = min(6.0, age_condition + boost * (6.0 - age_condition))
 
         # Virtual Segments
         seg_len = self.length / N_SEGMENTS_PER_PIPE
         self.segments = [VirtualSegment(seg_len) for _ in range(N_SEGMENTS_PER_PIPE)]
 
-        # Seed breaks based on age
-        self._seed_breaks(life_fraction)
+        # Seed breaks based on age (use clamped fraction for seeding)
+        self._seed_breaks(min(1.0, life_fraction))
 
         self.reset_physics_params()
         self.update_leyp_state()
@@ -131,7 +154,15 @@ class Pipe:
             return max(0.1, rul)
 
     def update_leyp_state(self):
-        self.n_breaks = map_condition_to_n_start(self.current_condition)
+        """Synchronize pipe-level break count from virtual segment state.
+
+        The LEYP feedback term (1 + α·n_breaks) requires the cumulative
+        break count across all segments — the actual break history, not a
+        condition-derived proxy.  Virtual segments already accumulate
+        Poisson events in n_point_breaks, so summing them gives the
+        correct pipe-level count at every point in the simulation.
+        """
+        self.n_breaks = sum(seg.n_point_breaks for seg in self.segments)
         if not hasattr(self, "initial_n_breaks"):
             self.initial_n_breaks = self.n_breaks
 

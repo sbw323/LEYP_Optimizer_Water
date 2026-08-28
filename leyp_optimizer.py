@@ -26,7 +26,7 @@ from pymoo.operators.sampling.rnd import FloatRandomSampling
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
 
-from config.checkpoint import (
+from checkpoint import (
     OptimizationCheckpoint,
     safe_write_file,
 )
@@ -187,7 +187,7 @@ def run_optimization():
 
     # 2. Re-Run Simulation with Logging Enabled
     try:
-        inv_cost, risk_cost, cip_cost, emergency_cost = run_simulation(
+        inv_cost, risk_cost, cip_cost, emergency_cost, total_breaks = run_simulation(
             use_mock_data=False,
             override_input_path=optimized_input_path,
             output_dir=output_dir,  # Enable report generation to output directory
@@ -196,7 +196,7 @@ def run_optimization():
             generate_report=True,  # <--- TRIGGERS THE REPORT
         )
 
-        print(f"Victory lap completed - Investment: ${inv_cost:,.0f}, Risk: ${risk_cost:,.0f}")
+        print(f"Victory lap completed - Investment: ${inv_cost:,.0f}, Risk: ${risk_cost:,.0f}, Breaks: {total_breaks}")
 
     except Exception as e:
         print(f"Error generating action plan: {e}")

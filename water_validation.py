@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from config.checkpoint import safe_write_file
+from checkpoint import safe_write_file
 from leyp_runner import run_simulation
 
 
@@ -42,25 +42,30 @@ def generate_validation_curve(
     # Fixed trigger for all tests - use moderate value that allows replacements
     fixed_trigger = 3.5
 
+    # Fixed seed ensures identical pipe initialization and stochastic events
+    # across all budget points — the ONLY variable is the budget level.
+    # Without this, stochastic noise swamps the budget signal.
+    VALIDATION_SEED = 12345
+
     # Generate budget test points
     budgets = np.linspace(budget_min, budget_max, n_points)
 
     # Run baseline simulation with zero budget to get maximum breaks
     print("Running baseline simulation (zero budget)...")
     try:
-        baseline_inv, baseline_risk, baseline_cip, baseline_emergency = run_simulation(
+        np.random.seed(VALIDATION_SEED)
+        baseline_inv, baseline_risk, baseline_cip, baseline_emergency, baseline_breaks = run_simulation(
             use_mock_data=False,
             override_input_path=input_file_path,
             annual_budget=0.0,
             rehab_trigger=fixed_trigger,
             generate_report=True,
         )
-        baseline_breaks = _estimate_break_count_from_emergency_cost(baseline_emergency)
 
         # Load pipe network to get total pipe statistics
         pipe_df = pd.read_csv(input_file_path)
         total_pipes_count = len(pipe_df)
-        total_pipes_length = pipe_df["length"].sum()
+        total_pipes_length = pipe_df["Length"].sum()
 
     except Exception as e:
         print(f"Error in baseline simulation: {e}")
@@ -77,7 +82,8 @@ def generate_validation_curve(
         print(f"Testing budget {i + 1}/{n_points}: ${budget:,.0f}")
 
         try:
-            inv_cost, risk_cost, cip_cost, emergency_cost = run_simulation(
+            np.random.seed(VALIDATION_SEED)
+            inv_cost, risk_cost, cip_cost, emergency_cost, current_breaks = run_simulation(
                 use_mock_data=False,
                 override_input_path=input_file_path,
                 annual_budget=budget,
@@ -85,16 +91,18 @@ def generate_validation_curve(
                 generate_report=True,
             )
 
-            # Estimate metrics from costs
-            current_breaks = _estimate_break_count_from_emergency_cost(emergency_cost)
+            # Use actual break counts and CIP cost estimates for metrics
             replaced_pipes_count = _estimate_replaced_count_from_cip_cost(cip_cost)
             replaced_pipes_length = _estimate_replaced_length_from_cip_cost(cip_cost)
 
-            # Calculate percentages
+            # Calculate percentages (guard against zero baseline)
             pct_replaced_num = min(100.0, (replaced_pipes_count / total_pipes_count) * 100.0)
-            pct_avoided_num = max(
-                0.0, min(100.0, ((baseline_breaks - current_breaks) / baseline_breaks) * 100.0)
-            )
+            if baseline_breaks > 0:
+                pct_avoided_num = max(
+                    0.0, min(100.0, ((baseline_breaks - current_breaks) / baseline_breaks) * 100.0)
+                )
+            else:
+                pct_avoided_num = 0.0
 
             pct_replaced_len = min(100.0, (replaced_pipes_length / total_pipes_length) * 100.0)
             pct_avoided_len = pct_avoided_num  # Same break avoidance regardless of metric

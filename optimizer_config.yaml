@@ -3,7 +3,7 @@
 # ==========================================
 
 # 1. FILE PATHS
-master_input_file: "Louisa_LEYP_Input_csv.csv"
+master_input_file: "Louisa_wConduits_Input_CSV.csv"
 output_base_dir: "Optimization_Results_NSGA2"
 
 # 2. DATA PROCESSING
@@ -13,7 +13,7 @@ skip_segmentation: True
 genes:
   budget: 
     min: 10000
-    max: 2000000
+    max: 500000
   rehab_trigger: 
     min: 1.0
     max: 3.5
@@ -27,4 +27,4 @@ algorithm:
   pop_size: 5
   n_offsprings: 3
   n_gen: 15
-  seed: 1027895609238
+  seed: 895
