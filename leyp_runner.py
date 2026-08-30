@@ -24,6 +24,7 @@ from leyp_config import (
     ANNUAL_BUDGET,
     COLUMN_MAP,
     DEFAULT_REPLACEMENT_MATERIAL,
+    DISCOUNT_RATE,
     EMERGENCY_REPLACEMENT_COST_PER_FT,
     N_SEGMENTS_PER_PIPE,
     SIMULATION_YEARS,
@@ -77,6 +78,7 @@ def _simulate_once(
     rehab_trigger: float,
     seed: int | None = None,
     no_intervention: bool = False,
+    discount_rate: float | None = None,
 ) -> dict:
     """Run a single 100-year replicate.
 
@@ -97,6 +99,8 @@ def _simulate_once(
     if seed is not None:
         np.random.seed(seed)
 
+    rate = DISCOUNT_RATE if discount_rate is None else discount_rate
+
     network = _build_network(raw_df)
     replacement_manager = ReplacementManager(budget=annual_budget, rehab_trigger=rehab_trigger)
 
@@ -105,6 +109,11 @@ def _simulate_once(
     repair_cost = 0.0  # Emergency repairs (per-break costs)
     emergency_cost = 0.0  # Emergency replacements (failed pipe costs)
     total_breaks = 0  # Cumulative break events across all pipes
+
+    # Present values of the same three streams, discounted to year 0.
+    pv_cip = 0.0
+    pv_repair = 0.0
+    pv_emergency = 0.0
 
     all_actions = []  # Action log combining CIP, emergency, and break events
     yearly = []  # Per-year diagnostic rows
@@ -204,10 +213,6 @@ def _simulate_once(
         year_break_events = 0
         year_repair_cost = 0.0
 
-        # 1. DEGRADE — apply natural aging
-        for pipe in network:
-            pipe.degrade()
-
         year_backlog_cip = 0
         if no_intervention:
             cip_report = {
@@ -216,11 +221,20 @@ def _simulate_once(
                 "Unfundable": 0, "Unfundable_Length": 0.0,
             }
         else:
-            # 2. PLANNED CIP REPLACEMENT — budget-constrained proactive
-            # replacements.  This runs BEFORE the emergency sweep (review
-            # finding B3): pipes that aged out during degradation get one
-            # chance at planned renewal instead of being handed straight to
-            # the emergency stream.
+            # 1. PLANNED CIP REPLACEMENT — budget-constrained proactive
+            # replacements, decided on condition as it stood at the last
+            # assessment (the end of the previous year), BEFORE this year's
+            # degradation is applied.
+            #
+            # Ordering degradation first let the programme intercept a pipe in
+            # the very year it crossed the failure floor, which no capital
+            # programme can schedule: it gave CIP perfect foresight and
+            # same-year execution, and made replacing at the last possible
+            # moment look optimal. Deciding on last year's observed condition
+            # means a pipe must be caught before it fails, which is what
+            # "proactive" has to mean. Pipes already at the floor stay
+            # eligible (review finding B3), so one the budget could not fund
+            # last year is still a candidate this year.
             cip_log_start = len(replacement_manager.action_log)
             cip_report = replacement_manager.run_year(network, year)
             cip_cost += cip_report["Spend"]
@@ -232,7 +246,12 @@ def _simulate_once(
                 if _tag_backlog(action, by_id[action["PipeID"]], "cip"):
                     year_backlog_cip += 1
 
-            # 3. EMERGENCY REPLACEMENT — pipes that aged out and CIP could not fund
+        # 2. DEGRADE — apply natural aging, after the year's plan is set
+        for pipe in network:
+            pipe.degrade()
+
+        if not no_intervention:
+            # 3. EMERGENCY REPLACEMENT — pipes the plan did not reach in time
             for pipe in network:
                 if pipe.current_condition <= 1.001:
                     _emergency_replace(pipe, year, CAUSE_DEGRADATION)
@@ -278,8 +297,19 @@ def _simulate_once(
                 cause = CAUSE_BREAK_FAILURE if sim_result["failed"] else CAUSE_BREAK_DAMAGE
                 _emergency_replace(pipe, year, cause)
 
+        # Discount the year's spend to present value.  Costs are treated as
+        # falling at year end, so year 1 is already discounted one period.
+        discount = 1.0 / ((1.0 + rate) ** year)
+        pv_cip += cip_report["Spend"] * discount
+        pv_repair += year_repair_cost * discount
+        pv_emergency += year_emergency.get("cost", 0.0) * discount
+
         row = {
             "Year": year,
+            "Discount_Factor": discount,
+            "PV_CIP_Spend": cip_report["Spend"] * discount,
+            "PV_Emergency_Cost": year_emergency.get("cost", 0.0) * discount,
+            "PV_Repair_Cost": year_repair_cost * discount,
             "Budget": annual_budget,
             "CIP_Count": cip_report["Count"],
             "CIP_Spend": cip_report["Spend"],
@@ -319,8 +349,14 @@ def _simulate_once(
     )
 
     return {
-        "investment_cost": cip_cost,
-        "risk_cost": repair_cost + emergency_cost,
+        # Objectives are present values (review finding: no discounting).
+        "investment_cost": pv_cip,
+        "risk_cost": pv_repair + pv_emergency,
+        # Undiscounted totals, reported alongside so cash requirements stay
+        # readable next to the discounted objectives.
+        "nominal_investment_cost": cip_cost,
+        "nominal_risk_cost": repair_cost + emergency_cost,
+        "discount_rate": rate,
         "cip_pipes": len(cip_pipes),
         "cip_pipe_length": sum(lengths[i] for i in cip_pipes),
         "emergency_pipes": len(emergency_pipes),
@@ -349,6 +385,7 @@ def simulate(
     seed: int | None = None,
     n_replicates: int = 1,
     no_intervention: bool = False,
+    discount_rate: float | None = None,
 ) -> dict:
     """Run the simulation and return the full result, not a fixed tuple.
 
@@ -384,6 +421,7 @@ def simulate(
             rehab_trigger=use_trigger,
             seed=None if seed is None else seed + i,
             no_intervention=no_intervention,
+            discount_rate=discount_rate,
         )
         for i in range(n_replicates)
     ]
@@ -407,6 +445,7 @@ def run_simulation(
     seed: int | None = None,
     n_replicates: int = 1,
     no_intervention: bool = False,
+    discount_rate: float | None = None,
 ) -> tuple:
     """Run the 100-year replacement simulation.
 
@@ -459,6 +498,7 @@ def run_simulation(
             rehab_trigger=use_trigger,
             seed=None if seed is None else seed + i,
             no_intervention=no_intervention,
+            discount_rate=discount_rate,
         )
         for i in range(n_replicates)
     ]
@@ -559,12 +599,21 @@ def _generate_reports(
     totals = [r["investment_cost"] + r["risk_cost"] for r in replicates]
 
     summary = {
-        "CIP_Cost": cip_cost,
-        "Repair_Cost": repair_cost,
-        "Emergency_Cost": emergency_cost,
+        # Present values — these are the optimiser's objectives.
         "Total_Investment": investment_cost,
         "Total_Risk": risk_cost,
         "Total_Cost": investment_cost + risk_cost,
+        "Discount_Rate": representative["discount_rate"],
+        # Undiscounted cash, for reading actual outlay by stream.
+        "CIP_Cost": cip_cost,
+        "Repair_Cost": repair_cost,
+        "Emergency_Cost": emergency_cost,
+        "Nominal_Investment": representative["nominal_investment_cost"],
+        "Nominal_Risk": representative["nominal_risk_cost"],
+        "Nominal_Total": (
+            representative["nominal_investment_cost"]
+            + representative["nominal_risk_cost"]
+        ),
         "Total_Breaks": total_breaks,
         # --- Review health metrics ---
         "CIP_Count": cip_count,
@@ -580,6 +629,18 @@ def _generate_reports(
         "Investment_Share_Of_Total": (
             investment_cost / (investment_cost + risk_cost)
             if (investment_cost + risk_cost)
+            else 0.0
+        ),
+        "Nominal_Investment_Share": (
+            representative["nominal_investment_cost"]
+            / (
+                representative["nominal_investment_cost"]
+                + representative["nominal_risk_cost"]
+            )
+            if (
+                representative["nominal_investment_cost"]
+                + representative["nominal_risk_cost"]
+            )
             else 0.0
         ),
         "Yr1_2_Emergency_Vs_Annual_Mean": (

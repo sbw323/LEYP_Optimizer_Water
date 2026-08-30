@@ -112,11 +112,15 @@ SIMULATION_YEARS = 100
 # 6. COST PARAMETERS
 # ==========================================
 
+# Real discount rate applied to both objectives.  Without discounting a dollar
+# spent in year 100 counts the same as one spent today, which removes any
+# time-value reason to sequence work and lets the optimiser treat a distant
+# emergency as equivalent to an immediate one.  3% real is conventional for
+# water utility capital planning; set to 0.0 to recover undiscounted totals.
+DISCOUNT_RATE = 0.03
+
 # Annual Budget
 ANNUAL_BUDGET = 50000
-
-# Pipe failure replacement cost (legacy parameter)
-GLOBAL_COST_PER_FT = 500
 
 # Water Main Replacement Costs
 CIP_REPLACEMENT_COST_PER_INCH_FT = 120.00

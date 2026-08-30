@@ -112,6 +112,7 @@ class Water_LEYP_Problem(ElementwiseProblem):
         # the genes rather than to simulation noise.
         self.seed = sim.get("seed")
         self.n_replicates = int(sim.get("n_replicates", 1))
+        self.discount_rate = config.get("discount_rate")
 
         super().__init__(
             n_var=2,  # Budget, Rehab_trigger
@@ -151,6 +152,7 @@ class Water_LEYP_Problem(ElementwiseProblem):
                 rehab_trigger=rehab_trigger,
                 seed=self.seed,
                 n_replicates=self.n_replicates,
+                discount_rate=self.discount_rate,
             )
         except Exception as e:
             print(f"[Optimizer Error] {e}")
@@ -213,6 +215,7 @@ def run_optimization():
     )
 
     # Results Processing
+    # Objectives are present values at config["discount_rate"].
     cols = ["Investment_Cost", "Risk_Cost"]
     df = pd.DataFrame(res.F, columns=cols)
     df["Budget"] = res.X[:, 0]
@@ -266,6 +269,7 @@ def run_optimization():
             generate_report=True,  # <--- TRIGGERS THE REPORT
             seed=sim_cfg.get("seed"),
             n_replicates=int(sim_cfg.get("n_replicates", 1)),
+            discount_rate=config.get("discount_rate"),
         )
 
         print(f"Victory lap completed - Investment: ${inv_cost:,.0f}, Risk: ${risk_cost:,.0f}, Breaks: {total_breaks}")

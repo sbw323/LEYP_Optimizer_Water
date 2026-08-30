@@ -10,10 +10,20 @@ diagonal over the early part of the curve.
 
 Two panels, measured on genuinely different bases:
 
-  count-based  x = % of pipes proactively replaced
-               y = % of breaks avoided
-  length-based x = % of network length proactively replaced
-               y = % of emergency-replacement length avoided
+  count-based        x = % of pipes proactively replaced
+                     y = % of breaks avoided
+  length-based       x = % of network length proactively replaced
+                     y = % of emergency-replacement length avoided
+  cost-effectiveness x = % of network length proactively replaced
+                     y = emergency cost avoided per dollar of CIP spend
+
+The third panel exists because the first two understate what the programme
+buys on this network. Renewal here is overwhelmingly age-out driven, and
+age-out produces no breaks, so moving a pipe from the emergency stream to the
+CIP stream changes who pays and when far more than it changes how often the
+pipe breaks. Cost avoided per dollar spent measures that directly, and its
+break-even line shows where further proactive spending stops paying for
+itself. All figures are present values.
 
 Both y axes measure what the CIP programme buys, so the reference is a
 reactive-only policy: no planned replacement, but failures still repaired and
@@ -54,6 +64,34 @@ def _avoided(baseline: float, current: float) -> float:
     return float(min(100.0, max(0.0, 100.0 * (baseline - current) / baseline)))
 
 
+def _paired_ratios(baseline_reps: list, run_reps: list) -> np.ndarray:
+    """Per-replicate emergency cost avoided per CIP dollar.
+
+    Replicate *i* of the baseline and of the run share a seed, so pairing them
+    compares the same stochastic world and removes most of the between-world
+    variance. Divergence still grows once the two policies act differently, so
+    the spread is reported rather than assumed away: at very small budgets the
+    ratio is dominated by that divergence, not by the policy, and swings
+    wildly in sign across seeds.
+    """
+    ratios = []
+    for base, run in zip(baseline_reps, run_reps):
+        spend = run["investment_cost"]
+        if spend > 0:
+            ratios.append((base - run["risk_cost"]) / spend)
+    return np.asarray(ratios, dtype=float)
+
+
+def _ratio_mean(baseline_reps: list, run_reps: list) -> float:
+    r = _paired_ratios(baseline_reps, run_reps)
+    return float(np.mean(r)) if r.size else float("nan")
+
+
+def _ratio_sd(baseline_reps: list, run_reps: list) -> float:
+    r = _paired_ratios(baseline_reps, run_reps)
+    return float(np.std(r)) if r.size else float("nan")
+
+
 def generate_validation_curve(
     input_file_path: str,
     budget_min: float = 0.0,
@@ -89,6 +127,8 @@ def generate_validation_curve(
     )
     baseline_breaks = baseline["total_breaks"]
     baseline_emergency_length = baseline["emergency_replacement_length"]
+    baseline_risk = baseline["risk_cost"]
+    baseline_risk_reps = [r["risk_cost"] for r in baseline["replicates"]]
     total_pipes = baseline["n_pipes"]
     total_length = baseline["network_length"]
 
@@ -151,6 +191,13 @@ def generate_validation_curve(
                         for r in reps
                     ])
                 ),
+                # Cost-effectiveness: emergency cost avoided per CIP dollar,
+                # both discounted. Above 1.0 the proactive dollar pays for
+                # itself; below it, deferral is cheaper.
+                "cip_spend_pv": run["investment_cost"],
+                "risk_avoided_pv": baseline_risk - run["risk_cost"],
+                "cost_effectiveness": _ratio_mean(baseline_risk_reps, reps),
+                "sd_cost_effectiveness": _ratio_sd(baseline_risk_reps, reps),
                 "no_intervention_breaks": no_intervention_breaks,
                 "reactive_only_breaks": baseline_breaks,
             }
@@ -190,7 +237,7 @@ def plot_validation_curve(curve: pd.DataFrame, output_path: str) -> None:
         curve: DataFrame from generate_validation_curve.
         output_path: Path to save the PNG.
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
 
     _panel(
         ax1,
@@ -210,6 +257,29 @@ def plot_validation_curve(curve: pd.DataFrame, output_path: str) -> None:
         "Length-based: emergency length avoided vs length renewed",
         "tab:green",
     )
+
+    # Third panel: does the proactive dollar pay for itself?
+    ce = curve.dropna(subset=["cost_effectiveness"]).sort_values("pct_replaced_by_length")
+    x = ce["pct_replaced_by_length"].to_numpy()
+    y = ce["cost_effectiveness"].to_numpy()
+    sd = ce["sd_cost_effectiveness"].fillna(0.0).to_numpy()
+
+    ax3.axhline(1.0, color="r", linestyle="--", linewidth=1, alpha=0.7,
+                label="Break-even (1 dollar avoided per dollar spent)")
+    ax3.fill_between(x, y - sd, y + sd, color="tab:purple", alpha=0.20,
+                     linewidth=0, label="±1 sd across paired replicates")
+    ax3.plot(x, y, "-o", color="tab:purple", linewidth=2, markersize=4,
+             label="Emergency cost avoided per CIP dollar")
+    ax3.axvspan(0, 50, color="grey", alpha=0.07, zorder=0)
+    ax3.set_xlabel("% network length proactively replaced")
+    ax3.set_ylabel("Emergency cost avoided per CIP dollar (PV)")
+    ax3.set_title("Cost-effectiveness: does proactive spend pay for itself?")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend(loc="upper right", fontsize=8)
+    ax3.set_xlim(0, 100)
+    # Symmetric log keeps the informative mid-range readable without hiding
+    # the wild, noise-dominated ratios at very small budgets.
+    ax3.set_yscale("symlog", linthresh=1.0)
 
     fig.suptitle(
         "Shaded band = first 50% of replacement activity, where risk-based "
@@ -246,7 +316,17 @@ def summarize_validation(curve: pd.DataFrame) -> dict:
             return False
         return bool((early[y_col] >= early[x_col]).all())
 
+    # Require the point to clear break-even by more than its own spread, so a
+    # noise-dominated ratio at a tiny budget is not read as a real return.
+    paying = curve[
+        (curve["cost_effectiveness"] - curve["sd_cost_effectiveness"].fillna(0.0)) >= 1.0
+    ]
+
     return {
+        "max_cost_effectiveness": float(curve["cost_effectiveness"].max(skipna=True)),
+        "breakeven_up_to_pct_length": (
+            float(paying["pct_replaced_by_length"].max()) if not paying.empty else 0.0
+        ),
         "max_pct_replaced_by_number": float(curve["pct_replaced_by_number"].max()),
         "max_pct_replaced_by_length": float(curve["pct_replaced_by_length"].max()),
         "max_pct_avoided_by_number": float(curve["pct_avoided_by_number"].max()),

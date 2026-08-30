@@ -167,3 +167,29 @@ def test_summary_reports_reach_and_diagonal(curve):
     ):
         assert key in s
     assert isinstance(s["above_diagonal_first_50_by_number"], bool)
+
+
+# --- Cost-effectiveness panel --------------------------------------------------
+
+def test_cost_effectiveness_is_reported(curve):
+    for col in ("cip_spend_pv", "risk_avoided_pv", "cost_effectiveness"):
+        assert col in curve.columns
+
+
+def test_cost_effectiveness_is_avoided_over_spent(curve):
+    funded = curve[curve["cip_spend_pv"] > 0]
+    assert not funded.empty
+    expected = funded["risk_avoided_pv"] / funded["cip_spend_pv"]
+    assert funded["cost_effectiveness"].to_numpy() == pytest.approx(expected.to_numpy())
+
+
+def test_zero_budget_has_no_cost_effectiveness(curve):
+    """With nothing spent the ratio is undefined, not zero or infinite."""
+    assert np.isnan(curve["cost_effectiveness"].iloc[0])
+
+
+def test_summary_reports_the_breakeven_point(curve):
+    s = summarize_validation(curve)
+    assert "max_cost_effectiveness" in s
+    assert "breakeven_up_to_pct_length" in s
+    assert 0.0 <= s["breakeven_up_to_pct_length"] <= 100.0

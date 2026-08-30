@@ -22,8 +22,9 @@ genes:
     max: 3.5
 
 # 4. ECONOMIC PARAMETERS
-# Global multiplier for Risk = Length * CoF * This_Value
-avg_failure_cost_per_ft: 500.0
+# Real annual discount rate applied to both objectives. Without it a dollar in
+# year 100 counts the same as one today. 0.0 recovers undiscounted totals.
+discount_rate: 0.03
 
 # 5. SIMULATION DETERMINISM
 # seed: base seed applied to every evaluation (common random numbers), so a

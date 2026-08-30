@@ -187,3 +187,103 @@ def test_unfunded_age_out_falls_as_budget_rises(tmp_path):
         return pd.read_csv(out / "cost_summary.csv").iloc[0]["Emergency_degradation"]
 
     assert degradation_emergencies(3_000_000.0) < degradation_emergencies(100_000.0)
+
+
+# --- Planning realism: CIP cannot intercept a pipe the year it fails ----------
+
+def test_cip_decides_on_last_assessment_condition(pipe_attrs, tmp_path):
+    """CIP must act on condition as observed before the year's degradation.
+
+    Deciding after degradation let the programme intercept a pipe in the very
+    year it crossed the failure floor — perfect foresight plus same-year
+    execution, which no capital programme can schedule, and which made
+    replacing at the last possible moment look optimal.
+    """
+    import pandas as pd
+
+    from leyp_runner import run_simulation
+
+    # One pipe that starts just above the floor. With unlimited budget and a
+    # trigger below its starting condition, CIP cannot see it this year, so
+    # it must age out into the emergency stream rather than be intercepted.
+    df = pd.DataFrame(
+        [{"PipeID": "X", "Material": "GI", "Age": 200, "Length": 100.0,
+          "Diameter": 6, "Condition": 1, "CoF_Value": 1}]
+    )
+    path = tmp_path / "one.csv"
+    df.to_csv(path, index=False)
+
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=str(path),
+        annual_budget=1e9,
+        rehab_trigger=1.0,          # below the pipe's starting condition
+        output_dir=str(out),
+        generate_report=True,
+        seed=61,
+    )
+    plan = pd.read_csv(out / "Optimal_Action_Plan.csv")
+    assert (plan["Action"] == "Emergency_Replacement").any()
+
+
+def test_last_moment_replacement_is_not_optimal(tmp_path):
+    """A trigger at the failure floor should now cost more than one with margin."""
+    from leyp_runner import simulate
+
+    def total(trigger):
+        r = simulate(
+            REAL_INVENTORY, annual_budget=1_000_000.0, rehab_trigger=trigger,
+            seed=20260830, n_replicates=3,
+        )
+        return r["investment_cost"] + r["risk_cost"]
+
+    assert total(1.5) < total(1.05)
+
+
+# --- NPV discounting -----------------------------------------------------------
+
+def test_objectives_are_present_values():
+    """Discounted objectives must be below their undiscounted totals."""
+    from leyp_runner import simulate
+
+    r = simulate(REAL_INVENTORY, annual_budget=1_000_000.0, rehab_trigger=1.5,
+                 seed=20260830, n_replicates=2)
+    assert r["investment_cost"] < r["nominal_investment_cost"]
+    assert r["risk_cost"] < r["nominal_risk_cost"]
+
+
+def test_zero_discount_rate_recovers_nominal_totals():
+    from leyp_runner import simulate
+
+    r = simulate(REAL_INVENTORY, annual_budget=1_000_000.0, rehab_trigger=1.5,
+                 seed=20260830, n_replicates=2, discount_rate=0.0)
+    assert r["investment_cost"] == pytest.approx(r["nominal_investment_cost"])
+    assert r["risk_cost"] == pytest.approx(r["nominal_risk_cost"])
+
+
+def test_higher_discount_rate_lowers_present_value():
+    from leyp_runner import simulate
+
+    def pv(rate):
+        r = simulate(REAL_INVENTORY, annual_budget=1_000_000.0, rehab_trigger=1.5,
+                     seed=20260830, n_replicates=2, discount_rate=rate)
+        return r["investment_cost"] + r["risk_cost"]
+
+    assert pv(0.07) < pv(0.03) < pv(0.0)
+
+
+def test_discount_factors_decline_over_the_horizon(tmp_path):
+    import pandas as pd
+
+    from leyp_runner import run_simulation
+
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=REAL_INVENTORY, annual_budget=1_000_000.0,
+        rehab_trigger=1.5, output_dir=str(out), generate_report=True,
+        seed=62, n_replicates=1,
+    )
+    diag = pd.read_csv(out / "simulation_diagnostics.csv")
+    factors = diag["Discount_Factor"].to_numpy()
+    assert (factors[:-1] > factors[1:]).all()
+    assert factors[0] < 1.0
