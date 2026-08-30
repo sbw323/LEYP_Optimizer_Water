@@ -216,3 +216,162 @@ def test_every_emergency_action_carries_a_cause(inventory_csv, tmp_path):
 def test_missing_input_raises_file_not_found(tmp_path):
     with pytest.raises(FileNotFoundError):
         run_simulation(override_input_path=str(tmp_path / "nope.csv"))
+
+
+# --- Phase 2: CIP precedes the emergency stream --------------------------------
+
+def _aged_out_pipe(pipe_attrs):
+    """A pipe one degradation step away from the failure floor."""
+    from leyp_core import Pipe
+
+    p = Pipe({**pipe_attrs, "Age": 96})
+    p.current_condition = 1.0005
+    return p
+
+
+def test_cip_captures_age_out_before_emergency(pipe_attrs, tmp_path, monkeypatch):
+    """A funded age-out pipe must be renewed by CIP, not emergency-replaced.
+
+    Review finding B3: the annual loop used to emergency-replace pipes the
+    moment degradation crossed the floor, before CIP ever saw them.
+    """
+    import leyp_runner
+    from water_replacement import ReplacementManager
+
+    seen = {"cip": 0, "emergency": 0}
+    real_run_year = ReplacementManager.run_year
+
+    def counting_run_year(self, network, year):
+        report = real_run_year(self, network, year)
+        seen["cip"] += report["Count"]
+        return report
+
+    monkeypatch.setattr(ReplacementManager, "run_year", counting_run_year)
+
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=str(_write_aging_inventory(tmp_path)),
+        annual_budget=1e9,          # never the binding constraint
+        rehab_trigger=3.0,
+        output_dir=str(out),
+        generate_report=True,
+        seed=41,
+    )
+    plan = pd.read_csv(out / "Optimal_Action_Plan.csv")
+    emergencies = plan[plan["Action"] == "Emergency_Replacement"]
+    # "Cause" only exists once an emergency has been logged at all.
+    aged_out = (
+        emergencies[emergencies["Cause"] == "degradation"]
+        if "Cause" in plan.columns
+        else emergencies.iloc[0:0]
+    )
+    assert seen["cip"] > 0
+    assert aged_out.empty, (
+        "with unlimited budget no pipe should age out into the emergency stream"
+    )
+
+
+def _write_aging_inventory(tmp_path):
+    df = pd.DataFrame(
+        [
+            {"PipeID": f"P{i}", "Material": "AC", "Age": 90, "Length": 100.0,
+             "Diameter": 6, "Condition": 1, "CoF_Value": 2}
+            for i in range(15)
+        ]
+    )
+    path = tmp_path / "aging.csv"
+    df.to_csv(path, index=False)
+    return path
+
+
+def test_budget_is_deployed_when_work_is_available(tmp_path):
+    """The Phase 2 gate: a constrained budget must actually get spent.
+
+    Uses the real inventory, where renewal demand always exceeds the budget.
+    A budget larger than the available work would idle legitimately, which is
+    not what this gate is about.
+    """
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path="Louisa_wConduits_Input_CSV.csv",
+        annual_budget=399046.84,
+        rehab_trigger=2.8,
+        output_dir=str(out),
+        generate_report=True,
+        seed=42,
+    )
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    assert summary["Mean_Budget_Utilization"] > 0.90
+    assert summary["Zero_Spend_Years"] == 0
+
+
+def test_idle_budget_is_not_forced_to_spend(tmp_path):
+    """A budget exceeding available work should idle, not manufacture work."""
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=str(_write_aging_inventory(tmp_path)),
+        annual_budget=1e7,
+        rehab_trigger=3.0,
+        output_dir=str(out),
+        generate_report=True,
+        seed=46,
+    )
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    assert summary["Mean_Budget_Utilization"] < 0.5
+
+
+def test_cip_outnumbers_emergency_when_funded(tmp_path):
+    """Acceptance criterion: planned work should dominate reactive work."""
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path="Louisa_wConduits_Input_CSV.csv",
+        annual_budget=399046.84,
+        rehab_trigger=2.8,
+        output_dir=str(out),
+        generate_report=True,
+        seed=43,
+    )
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    assert summary["CIP_Count"] > summary["Emergency_Count"]
+
+
+def test_unfundable_pipes_surface_in_diagnostics(tmp_path):
+    """Pipes that no single year can afford must be visible, not silent."""
+    df = pd.DataFrame(
+        [{"PipeID": "BIG", "Material": "AC", "Age": 90, "Length": 20000.0,
+          "Diameter": 12, "Condition": 1, "CoF_Value": 3}]
+    )
+    path = tmp_path / "big.csv"
+    df.to_csv(path, index=False)
+
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=str(path),
+        annual_budget=50000.0,
+        rehab_trigger=3.0,
+        output_dir=str(out),
+        generate_report=True,
+        seed=44,
+    )
+    diag = pd.read_csv(out / "simulation_diagnostics.csv")
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    assert diag["Unfundable"].max() >= 1
+    assert summary["Mean_Unfundable_Per_Year"] > 0
+    assert summary["CIP_Count"] == 0
+
+
+def test_absolute_emergency_counts_are_reported(inventory_csv, tmp_path):
+    """The year 1-2 ratio must be readable alongside its absolute counts."""
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=inventory_csv,
+        annual_budget=BUDGET,
+        rehab_trigger=TRIGGER,
+        output_dir=str(out),
+        generate_report=True,
+        seed=45,
+    )
+    diag = pd.read_csv(out / "simulation_diagnostics.csv")
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    assert summary["Yr1_2_Emergency_Count"] == diag.head(2)["Emergency_Count"].sum()
+    assert summary["Max_Annual_Emergency_Count"] == diag["Emergency_Count"].max()

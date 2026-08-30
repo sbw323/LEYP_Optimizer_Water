@@ -105,11 +105,6 @@ def _simulate_once(
     # Per-year emergency tallies, reset at the top of each year.
     year_emergency = {}
 
-    # Track pipes already at failure condition from initialization (B4).
-    # These are pre-existing failures the utility inherited — they should
-    # not be charged emergency replacement cost at simulation start.
-    initially_dead = {pipe.id for pipe in network if pipe.current_condition <= 1.001}
-
     # --- Inherited backlog (review finding A3) ---
     # Pipes that are already replacement-eligible in year 1 are a backlog the
     # utility inherited, not deterioration this plan caused.  Their first
@@ -190,29 +185,20 @@ def _simulate_once(
         pipe.reset_physics_params()
         pipe.update_leyp_state()
 
-        # If the pipe was in the initially_dead set and was later
-        # CIP-replaced, then degraded back to failure, it IS a new
-        # simulation event — remove from the bypass set.
-        initially_dead.discard(pipe.id)
-
     for year in range(1, SIMULATION_YEARS + 1):
         year_emergency = {}
         year_breaks = 0
         year_break_events = 0
         year_repair_cost = 0.0
 
-        # 1. DEGRADE — apply natural aging, catch degradation-caused failures
+        # 1. DEGRADE — apply natural aging
         for pipe in network:
-            if pipe.current_condition <= 1.001:
-                continue  # Already dead — no degradation to apply
-
             pipe.degrade()
 
-            # Degradation brought pipe below failure threshold
-            if pipe.current_condition <= 1.001:
-                _emergency_replace(pipe, year, CAUSE_DEGRADATION)
-
-        # 2. PLANNED CIP REPLACEMENT — budget-constrained proactive replacements
+        # 2. PLANNED CIP REPLACEMENT — budget-constrained proactive replacements.
+        # This now runs BEFORE the emergency sweep (review finding B3): pipes
+        # that aged out during degradation get one chance at planned renewal
+        # instead of being handed straight to the emergency stream.
         cip_log_start = len(replacement_manager.action_log)
         cip_report = replacement_manager.run_year(network, year)
         cip_cost += cip_report["Spend"]
@@ -225,13 +211,13 @@ def _simulate_once(
             if _tag_backlog(action, by_id[action["PipeID"]], "cip"):
                 year_backlog_cip += 1
 
-        # 3. BREAK SIMULATION AND EMERGENCY RESPONSE
+        # 3. EMERGENCY REPLACEMENT — pipes that aged out and CIP could not fund
         for pipe in network:
             if pipe.current_condition <= 1.001:
-                # Skip pipes at failure condition. Pre-existing failures
-                # (initially_dead) are left in place until B2/B4 is fixed.
-                continue
+                _emergency_replace(pipe, year, CAUSE_DEGRADATION)
 
+        # 4. BREAK SIMULATION AND EMERGENCY RESPONSE
+        for pipe in network:
             pre_break_condition = pipe.current_condition
             sim_result = pipe.simulate_year(year)
 
@@ -283,6 +269,10 @@ def _simulate_once(
             "Backlog_CIP": year_backlog_cip,
             "Backlog_Emergency": year_emergency.get("backlog", 0),
             "Backlog_Remaining": len(backlog_pending),
+            "Eligible": cip_report["Eligible"],
+            "Deferred": cip_report["Deferred"],
+            "Unfundable": cip_report["Unfundable"],
+            "Unfundable_Length": cip_report["Unfundable_Length"],
         }
         for cause in EMERGENCY_CAUSES:
             row[f"Emergency_{cause}"] = year_emergency.get(cause, 0)
@@ -493,6 +483,12 @@ def _generate_reports(
         "Yr1_2_Emergency_Vs_Annual_Mean": (
             (early / 2.0) / mean_annual_emergency if mean_annual_emergency else 0.0
         ),
+        # Absolute counts, reported alongside the ratio above: once emergencies
+        # become rare the ratio divides by a very small mean and overstates any
+        # early-year cluster, so it must not be read on its own.
+        "Yr1_2_Emergency_Count": int(early),
+        "Max_Annual_Emergency_Count": int(yearly_df["Emergency_Count"].max()),
+        "Mean_Unfundable_Per_Year": float(yearly_df["Unfundable"].mean()),
         "N_Replicates": len(replicates),
         "Total_Cost_SD": float(np.std(totals)) if len(replicates) > 1 else 0.0,
         # --- Inherited backlog (A3): eligible for replacement in year 1 ---
