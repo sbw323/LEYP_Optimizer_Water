@@ -38,6 +38,43 @@ from water_validation import generate_validation_curve, plot_validation_curve, s
 CONFIG_FILE = "optimizer_config.yaml"
 
 
+def annotate_front(df):
+    """Add normalised objectives and distance to the ideal point.
+
+    Both objectives are dollars, so Total_Cost is a meaningful scalar. It is
+    still only one reading of a two-objective result, so the front is
+    annotated with each solution's normalised position and its distance to
+    the ideal point, making the investment/risk trade-off visible rather than
+    collapsing it silently.
+    """
+    out = df.copy()
+    for col, name in (("Investment_Cost", "Norm_Investment"), ("Risk_Cost", "Norm_Risk")):
+        lo, hi = out[col].min(), out[col].max()
+        out[name] = 0.0 if hi == lo else (out[col] - lo) / (hi - lo)
+    out["Ideal_Distance"] = np.sqrt(out["Norm_Investment"] ** 2 + out["Norm_Risk"] ** 2)
+    return out
+
+
+def select_strategy(df, method="min_total_cost"):
+    """Choose one strategy from the Pareto front.
+
+    Args:
+        df: Annotated front from annotate_front.
+        method: "min_total_cost" picks the lowest total lifecycle cost.
+            "knee" picks the solution closest to the ideal point once both
+            objectives are normalised — the best-balanced trade-off, which
+            does not assume the two dollar streams are interchangeable.
+
+    Returns:
+        Index of the selected row.
+    """
+    if method == "knee":
+        return df["Ideal_Distance"].idxmin()
+    if method != "min_total_cost":
+        raise ValueError(f"Unknown selection method: {method}")
+    return df["Total_Cost"].idxmin()
+
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         raise FileNotFoundError(f"Missing config file: {CONFIG_FILE}")
@@ -176,6 +213,7 @@ def run_optimization():
     df["Budget"] = res.X[:, 0]
     df["Rehab_Trigger"] = res.X[:, 1]
     df["Total_Cost"] = df["Investment_Cost"] + df["Risk_Cost"]
+    df = annotate_front(df).sort_values("Total_Cost", ignore_index=True)
 
     results_path = os.path.join(output_dir, "nsga2_results.csv")
     safe_write_file(results_path, df.to_csv(index=False))
@@ -188,11 +226,28 @@ def run_optimization():
     print("\n--- Generating Optimal Action Plan ---")
 
     # 1. Identify Best Strategy
-    best_idx = df["Total_Cost"].idxmin()
+    method = config.get("selection", "min_total_cost")
+    best_idx = select_strategy(df, method)
     best = df.loc[best_idx]
 
+    print(f"Selection rule: {method}")
     print(f"Best Strategy Found: Total Cost ${best['Total_Cost']:,.0f}")
     print(f"Parameters: Budget=${best['Budget']:,.0f} | Rehab_Trigger={best['Rehab_Trigger']:.2f}")
+
+    # Report the alternative reading so the trade-off stays visible.
+    other = "knee" if method == "min_total_cost" else "min_total_cost"
+    alt = df.loc[select_strategy(df, other)]
+    if not alt.equals(best):
+        print(
+            f"  ({other} would pick Budget=${alt['Budget']:,.0f}, "
+            f"Trigger={alt['Rehab_Trigger']:.2f}, Total ${alt['Total_Cost']:,.0f})"
+        )
+
+    if best["Budget"] >= config["genes"]["budget"]["max"] * 0.98:
+        print(
+            "  [warning] The selected budget sits at the upper gene bound; the "
+            "true optimum may lie above it. Consider raising genes.budget.max."
+        )
 
     # 2. Re-Run Simulation with Logging Enabled
     sim_cfg = config.get("simulation", {}) or {}

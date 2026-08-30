@@ -121,7 +121,16 @@ GLOBAL_COST_PER_FT = 500
 # Water Main Replacement Costs
 CIP_REPLACEMENT_COST_PER_INCH_FT = 120.00
 EMERGENCY_REPAIR_COST_PER_BREAK = 5000.00
-EMERGENCY_REPLACEMENT_COST_PER_FT = 800.00
+
+# Emergency replacement carries a premium over planned CIP work: mobilisation,
+# out-of-hours crews, service interruption, road reinstatement and the loss of
+# any opportunity to upsize or co-ordinate with other works.  At $5,000/ft
+# against CIP's $120/inch-ft this is roughly 6.9x for a 6-inch main and 3.5x
+# for a 12-inch one, in line with the 2-5x range typical of utility practice.
+# This rate is also the consequence term in ReplacementManager risk scoring;
+# because it enters both risk and cost uniformly it scales the objectives
+# without altering the replacement ranking.
+EMERGENCY_REPLACEMENT_COST_PER_FT = 5000.00
 DEFAULT_REPLACEMENT_MATERIAL = "HDPE"
 
 # ==========================================
