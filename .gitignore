@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# Optimizer runtime artifacts
+nsga2_checkpoint.pkl
+temp_optimization_input.csv
