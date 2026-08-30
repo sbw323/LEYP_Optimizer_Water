@@ -4,10 +4,13 @@ import numpy as np
 
 from leyp_config import (
     ALPHA,
+    BREAK_CONDITION_PENALTY,
+    BREAK_DAMAGE_CONDITION_FLOOR,
     COEFF_DIAMETER,
     DEGRADATION_PARAMS,
     EMERGENCY_REPAIR_COST_PER_BREAK,
     HAZARD_LENGTH_SCALE,
+    LEYP_BREAK_FEEDBACK_CAP,
     MATERIAL_PROPS,
     N_SEGMENTS_PER_PIPE,
     SEGMENT_BREAK_THRESHOLD,
@@ -207,7 +210,10 @@ class Pipe:
         t = max(current_age, 0.1)
         h0 = (self.beta / self.eta) * ((t / self.eta) ** (self.beta - 1))
         cov_factor = self.mat_mult * np.exp(COEFF_DIAMETER * self.diameter)
-        leyp_factor = 1.0 + (ALPHA * self.n_breaks)
+        # Saturating feedback: break history raises hazard but the effect
+        # plateaus.  An unbounded term diverges once pipes stop being renewed.
+        effective_breaks = min(self.n_breaks, LEYP_BREAK_FEEDBACK_CAP)
+        leyp_factor = 1.0 + (ALPHA * effective_breaks)
         return h0 * cov_factor * leyp_factor
 
     def simulate_year(self, sim_year_idx):
@@ -228,10 +234,15 @@ class Pipe:
             n = seg.simulate_breaks(intensity)
             total_new_breaks += n
 
-        # Apply damage from new breaks
+        # Apply damage from new breaks.  Floored above the failure threshold:
+        # this coupling exists to make a frequently-breaking pipe read as poor
+        # condition (and so become CIP-eligible), not to act as a third,
+        # independent route to failure alongside age-out and the segment rule.
         if total_new_breaks > 0:
-            damage = 0.3 * total_new_breaks
-            self.current_condition = max(1.0, self.current_condition - damage)
+            damage = BREAK_CONDITION_PENALTY * total_new_breaks
+            self.current_condition = max(
+                BREAK_DAMAGE_CONDITION_FLOOR, self.current_condition - damage
+            )
             self.update_leyp_state()
 
         # Check for segment failure (regardless of whether new breaks occurred)

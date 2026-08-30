@@ -74,6 +74,7 @@ def _simulate_once(
     annual_budget: float,
     rehab_trigger: float,
     seed: int | None = None,
+    no_intervention: bool = False,
 ) -> dict:
     """Run a single 100-year replicate.
 
@@ -83,6 +84,10 @@ def _simulate_once(
         rehab_trigger: Condition threshold for CIP eligibility.
         seed: Seed applied to the global NumPy stream before the network is
             built.  ``None`` leaves the stream untouched (non-reproducible).
+        no_intervention: True runs a genuine do-nothing baseline: no CIP and
+            no emergency renewal, with pipes left in service accruing breaks.
+            A zero budget alone is not a do-nothing baseline, because
+            emergency replacement still renews the network for free.
 
     Returns:
         Dict of cost totals, the combined action log, and per-year diagnostics.
@@ -195,26 +200,34 @@ def _simulate_once(
         for pipe in network:
             pipe.degrade()
 
-        # 2. PLANNED CIP REPLACEMENT — budget-constrained proactive replacements.
-        # This now runs BEFORE the emergency sweep (review finding B3): pipes
-        # that aged out during degradation get one chance at planned renewal
-        # instead of being handed straight to the emergency stream.
-        cip_log_start = len(replacement_manager.action_log)
-        cip_report = replacement_manager.run_year(network, year)
-        cip_cost += cip_report["Spend"]
-
-        # Tag this year's CIP actions against the inherited backlog.  Reading
-        # the log slice keeps the tagging in true chronological order.
-        by_id = {p.id: p for p in network}
         year_backlog_cip = 0
-        for action in replacement_manager.action_log[cip_log_start:]:
-            if _tag_backlog(action, by_id[action["PipeID"]], "cip"):
-                year_backlog_cip += 1
+        if no_intervention:
+            cip_report = {
+                "Year": year, "Spend": 0.0, "Count": 0,
+                "Eligible": 0, "Deferred": 0,
+                "Unfundable": 0, "Unfundable_Length": 0.0,
+            }
+        else:
+            # 2. PLANNED CIP REPLACEMENT — budget-constrained proactive
+            # replacements.  This runs BEFORE the emergency sweep (review
+            # finding B3): pipes that aged out during degradation get one
+            # chance at planned renewal instead of being handed straight to
+            # the emergency stream.
+            cip_log_start = len(replacement_manager.action_log)
+            cip_report = replacement_manager.run_year(network, year)
+            cip_cost += cip_report["Spend"]
 
-        # 3. EMERGENCY REPLACEMENT — pipes that aged out and CIP could not fund
-        for pipe in network:
-            if pipe.current_condition <= 1.001:
-                _emergency_replace(pipe, year, CAUSE_DEGRADATION)
+            # Tag this year's CIP actions against the inherited backlog.
+            # Reading the log slice keeps the tagging chronological.
+            by_id = {p.id: p for p in network}
+            for action in replacement_manager.action_log[cip_log_start:]:
+                if _tag_backlog(action, by_id[action["PipeID"]], "cip"):
+                    year_backlog_cip += 1
+
+            # 3. EMERGENCY REPLACEMENT — pipes that aged out and CIP could not fund
+            for pipe in network:
+                if pipe.current_condition <= 1.001:
+                    _emergency_replace(pipe, year, CAUSE_DEGRADATION)
 
         # 4. BREAK SIMULATION AND EMERGENCY RESPONSE
         for pipe in network:
@@ -248,8 +261,12 @@ def _simulate_once(
                     }
                 )
 
-            # Handle pipe failure from break accumulation
-            if sim_result["failed"] or pipe.current_condition <= 1.001:
+            # Handle pipe failure from break accumulation.  Under
+            # no_intervention the pipe is left in service and keeps breaking,
+            # which is what makes the baseline a true do-nothing case.
+            if not no_intervention and (
+                sim_result["failed"] or pipe.current_condition <= 1.001
+            ):
                 cause = CAUSE_BREAK_FAILURE if sim_result["failed"] else CAUSE_BREAK_DAMAGE
                 _emergency_replace(pipe, year, cause)
 
@@ -309,6 +326,7 @@ def run_simulation(
     generate_report: bool = False,
     seed: int | None = None,
     n_replicates: int = 1,
+    no_intervention: bool = False,
 ) -> tuple:
     """Run the 100-year replacement simulation.
 
@@ -326,6 +344,9 @@ def run_simulation(
         n_replicates: Number of stochastic replicates to average.  Costs and
             break counts are returned as means; reports are written from the
             replicate closest to the mean total cost.
+        no_intervention: True runs a do-nothing baseline with no CIP and no
+            emergency renewal — the reference case for break-rate calibration
+            and for the validation curve's denominator.
 
     Returns:
         (investment_cost, risk_cost) or, with generate_report,
@@ -357,6 +378,7 @@ def run_simulation(
             annual_budget=use_budget,
             rehab_trigger=use_trigger,
             seed=None if seed is None else seed + i,
+            no_intervention=no_intervention,
         )
         for i in range(n_replicates)
     ]
