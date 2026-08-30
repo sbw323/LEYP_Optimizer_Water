@@ -18,6 +18,7 @@ import pandas as pd
 from checkpoint import safe_write_file
 from leyp_config import (
     ACTION_BREAK_EVENT,
+    BACKLOG_CONDITION,
     ACTION_EMERGENCY_REPLACEMENT,
     ANNUAL_BUDGET,
     COLUMN_MAP,
@@ -111,13 +112,19 @@ def _simulate_once(
     year_emergency = {}
 
     # --- Inherited backlog (review finding A3) ---
-    # Pipes that are already replacement-eligible in year 1 are a backlog the
+    # Pipes already in replacement-worthy condition in year 1 are a backlog the
     # utility inherited, not deterioration this plan caused.  Their first
     # replacement is tagged so the action plan distinguishes "working off the
     # backlog" from steady-state renewal.  This is reporting only: it does not
     # change which pipes are replaced or what they cost.
+    #
+    # Measured against the fixed BACKLOG_CONDITION standard, not the run's
+    # rehab_trigger.  The backlog is a property of the inventory, so it has to
+    # mean the same thing across strategies; scoring it against the trigger
+    # made it read as zero whenever the optimizer chose a low trigger, which
+    # described the strategy rather than the network.
     backlog_ids = {
-        pipe.id for pipe in network if pipe.current_condition <= rehab_trigger
+        pipe.id for pipe in network if pipe.current_condition <= BACKLOG_CONDITION
     }
     backlog_length = sum(p.length for p in network if p.id in backlog_ids)
     backlog_pending = set(backlog_ids)

@@ -134,3 +134,49 @@ def test_backlog_tagging_does_not_change_costs(inventory_csv):
 def test_backlog_is_bounded_by_the_network(backlog_run):
     _, summary, _ = backlog_run
     assert 0.0 <= summary["Backlog_Share_Of_Network"] <= 1.0
+
+
+def test_backlog_is_independent_of_the_rehab_trigger(inventory_csv, tmp_path):
+    """The backlog describes the inventory, not the strategy.
+
+    Scoring it against the run's trigger made it read as zero whenever the
+    optimizer chose a low trigger, which is exactly when the inherited
+    backlog matters most.
+    """
+    def backlog_size(trigger):
+        out = tmp_path / f"t{trigger}"
+        run_simulation(
+            override_input_path=inventory_csv,
+            annual_budget=250000.0,
+            rehab_trigger=trigger,
+            output_dir=str(out),
+            generate_report=True,
+            seed=51,
+        )
+        return pd.read_csv(out / "cost_summary.csv").iloc[0]["Backlog_Pipes"]
+
+    assert backlog_size(1.05) == backlog_size(3.4)
+
+
+def test_backlog_matches_the_fixed_condition_standard(inventory_csv, tmp_path):
+    from leyp_config import BACKLOG_CONDITION, COLUMN_MAP
+
+    np.random.seed(52)
+    df = pd.read_csv(inventory_csv)
+    expected = sum(
+        1
+        for _, r in df.iterrows()
+        if Pipe({k: r.get(k, None) for k in COLUMN_MAP}).current_condition
+        <= BACKLOG_CONDITION
+    )
+
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=inventory_csv,
+        annual_budget=250000.0,
+        rehab_trigger=1.5,
+        output_dir=str(out),
+        generate_report=True,
+        seed=52,
+    )
+    assert pd.read_csv(out / "cost_summary.csv").iloc[0]["Backlog_Pipes"] == expected

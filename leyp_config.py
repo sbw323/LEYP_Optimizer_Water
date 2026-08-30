@@ -138,6 +138,12 @@ DEFAULT_REPLACEMENT_MATERIAL = "HDPE"
 # ==========================================
 TRIGGERS = {"Rehab": 2.0}
 
+# Condition at or below which a pipe counts as inherited backlog in year 1.
+# Fixed deliberately rather than tied to the run's rehab trigger: the backlog
+# is a property of the inventory and must mean the same thing across every
+# strategy the optimizer evaluates.
+BACKLOG_CONDITION = 2.0
+
 # ==========================================
 # 8. ACTION CONSTANTS
 # ==========================================
