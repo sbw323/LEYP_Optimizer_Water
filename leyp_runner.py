@@ -110,6 +110,29 @@ def _simulate_once(
     # not be charged emergency replacement cost at simulation start.
     initially_dead = {pipe.id for pipe in network if pipe.current_condition <= 1.001}
 
+    # --- Inherited backlog (review finding A3) ---
+    # Pipes that are already replacement-eligible in year 1 are a backlog the
+    # utility inherited, not deterioration this plan caused.  Their first
+    # replacement is tagged so the action plan distinguishes "working off the
+    # backlog" from steady-state renewal.  This is reporting only: it does not
+    # change which pipes are replaced or what they cost.
+    backlog_ids = {
+        pipe.id for pipe in network if pipe.current_condition <= rehab_trigger
+    }
+    backlog_length = sum(p.length for p in network if p.id in backlog_ids)
+    backlog_pending = set(backlog_ids)
+    backlog_cleared = {"cip": 0, "emergency": 0}
+    backlog_emergency_cost = 0.0
+
+    def _tag_backlog(action, pipe, via):
+        """Mark an action as clearing inherited backlog, first replacement only."""
+        first = pipe.id in backlog_pending
+        action["Backlog"] = first
+        if first:
+            backlog_pending.discard(pipe.id)
+            backlog_cleared[via] += 1
+        return first
+
     def _emergency_replace(pipe, year, cause):
         """Charge emergency replacement cost and reset pipe to new state.
 
@@ -121,7 +144,7 @@ def _simulate_once(
             year: Current simulation year.
             cause: One of EMERGENCY_CAUSES, recorded for diagnostics.
         """
-        nonlocal emergency_cost
+        nonlocal emergency_cost, backlog_emergency_cost
 
         cost = pipe.length * EMERGENCY_REPLACEMENT_COST_PER_FT
         emergency_cost += cost
@@ -133,8 +156,7 @@ def _simulate_once(
         pre_condition = pipe.current_condition
         original_material = pipe.material
 
-        all_actions.append(
-            {
+        action = {
                 "Year": year,
                 "PipeID": pipe.id,
                 "Action": ACTION_EMERGENCY_REPLACEMENT,
@@ -148,8 +170,11 @@ def _simulate_once(
                 "Material": original_material,
                 "NewMaterial": DEFAULT_REPLACEMENT_MATERIAL,
                 "Cause": cause,
-            }
-        )
+        }
+        if _tag_backlog(action, pipe, "emergency"):
+            backlog_emergency_cost += cost
+            year_emergency["backlog"] = year_emergency.get("backlog", 0) + 1
+        all_actions.append(action)
 
         # --- Reset pipe state (mirrors CIP replacement) ---
         pipe.current_condition = 6.0
@@ -188,8 +213,17 @@ def _simulate_once(
                 _emergency_replace(pipe, year, CAUSE_DEGRADATION)
 
         # 2. PLANNED CIP REPLACEMENT — budget-constrained proactive replacements
+        cip_log_start = len(replacement_manager.action_log)
         cip_report = replacement_manager.run_year(network, year)
         cip_cost += cip_report["Spend"]
+
+        # Tag this year's CIP actions against the inherited backlog.  Reading
+        # the log slice keeps the tagging in true chronological order.
+        by_id = {p.id: p for p in network}
+        year_backlog_cip = 0
+        for action in replacement_manager.action_log[cip_log_start:]:
+            if _tag_backlog(action, by_id[action["PipeID"]], "cip"):
+                year_backlog_cip += 1
 
         # 3. BREAK SIMULATION AND EMERGENCY RESPONSE
         for pipe in network:
@@ -246,6 +280,9 @@ def _simulate_once(
             "Break_Events": year_break_events,
             "Breaks": year_breaks,
             "Repair_Cost": year_repair_cost,
+            "Backlog_CIP": year_backlog_cip,
+            "Backlog_Emergency": year_emergency.get("backlog", 0),
+            "Backlog_Remaining": len(backlog_pending),
         }
         for cause in EMERGENCY_CAUSES:
             row[f"Emergency_{cause}"] = year_emergency.get(cause, 0)
@@ -263,6 +300,13 @@ def _simulate_once(
         "total_breaks": total_breaks,
         "actions": all_actions,
         "yearly": yearly,
+        "backlog_pipes": len(backlog_ids),
+        "backlog_length": backlog_length,
+        "backlog_cleared_by_cip": backlog_cleared["cip"],
+        "backlog_cleared_by_emergency": backlog_cleared["emergency"],
+        "backlog_emergency_cost": backlog_emergency_cost,
+        "backlog_never_cleared": len(backlog_pending),
+        "network_pipes": len(network),
     }
 
 
@@ -358,6 +402,12 @@ def run_simulation(
     return investment_cost, risk_cost
 
 
+def _years_to_clear_backlog(yearly_df: pd.DataFrame) -> float:
+    """First year the inherited backlog reaches zero, or NaN if never cleared."""
+    cleared = yearly_df[yearly_df["Backlog_Remaining"] == 0]
+    return float(cleared["Year"].iloc[0]) if not cleared.empty else float("nan")
+
+
 def _generate_reports(
     output_dir: str,
     representative: dict,
@@ -386,6 +436,8 @@ def _generate_reports(
             action_df["Breaks"] = action_df["Breaks"].fillna(0).astype(int)
         if "Cause" in action_df.columns:
             action_df["Cause"] = action_df["Cause"].fillna("")
+        if "Backlog" in action_df.columns:
+            action_df["Backlog"] = action_df["Backlog"].fillna(False).astype(bool)
         action_csv_path = os.path.join(output_dir, "Optimal_Action_Plan.csv")
         safe_write_file(action_csv_path, action_df.to_csv(index=False))
 
@@ -443,6 +495,19 @@ def _generate_reports(
         ),
         "N_Replicates": len(replicates),
         "Total_Cost_SD": float(np.std(totals)) if len(replicates) > 1 else 0.0,
+        # --- Inherited backlog (A3): eligible for replacement in year 1 ---
+        "Backlog_Pipes": representative["backlog_pipes"],
+        "Backlog_Length_Ft": representative["backlog_length"],
+        "Backlog_Share_Of_Network": (
+            representative["backlog_pipes"] / representative["network_pipes"]
+            if representative["network_pipes"]
+            else 0.0
+        ),
+        "Backlog_Cleared_By_CIP": representative["backlog_cleared_by_cip"],
+        "Backlog_Cleared_By_Emergency": representative["backlog_cleared_by_emergency"],
+        "Backlog_Emergency_Cost": representative["backlog_emergency_cost"],
+        "Backlog_Never_Cleared": representative["backlog_never_cleared"],
+        "Backlog_Years_To_Clear": _years_to_clear_backlog(yearly_df),
     }
     for cause in EMERGENCY_CAUSES:
         summary[f"Emergency_{cause}"] = int(yearly_df[f"Emergency_{cause}"].sum())

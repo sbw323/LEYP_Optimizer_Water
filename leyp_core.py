@@ -107,19 +107,36 @@ class Pipe:
         self.has_failed_in_sim = False
 
     def _seed_breaks(self, life_fraction):
-        """Seed historical breaks based on age uniformly across segments.
+        """Seed historical breaks based on age, uniformly across segments.
+
+        Seeded breaks represent repairs the utility has already made.  Their
+        purpose is the LEYP feedback term (1 + alpha * n_breaks): a pipe that
+        has broken before is more likely to break again.  They must not, on
+        their own, condemn a pipe — the inventory lists these pipes as in
+        service, so a pipe that starts the simulation already past the failure
+        rule contradicts its own input data (review finding A1).
+
+        Each segment is therefore capped one break below
+        SEGMENT_BREAK_THRESHOLD.  The failure rule itself is unchanged: any
+        single segment reaching the threshold still condemns the pipe, and
+        seeded breaks still count toward it — a segment seeded at the cap
+        fails on its next break.
 
         Args:
             life_fraction (float): Fraction of standard life already lived (0-1)
         """
         max_expected = int(life_fraction * 6)
-        if max_expected > 0:
-            n_seeded = np.random.randint(0, max_expected + 1)
+        if max_expected <= 0:
+            return
 
-            # Distribute breaks uniformly across segments
-            for _ in range(n_seeded):
-                segment_idx = np.random.randint(0, len(self.segments))
-                self.segments[segment_idx].n_point_breaks += 1
+        n_seeded = np.random.randint(0, max_expected + 1)
+        seed_cap = SEGMENT_BREAK_THRESHOLD - 1
+
+        for _ in range(n_seeded):
+            available = [s for s in self.segments if s.n_point_breaks < seed_cap]
+            if not available:
+                break  # Every segment is at the cap; discard the remainder.
+            available[np.random.randint(0, len(available))].n_point_breaks += 1
 
     def reset_physics_params(self):
         mat_params = MATERIAL_PROPS.get(self.material, MATERIAL_PROPS["Default"])
