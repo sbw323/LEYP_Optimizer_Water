@@ -16,7 +16,11 @@ from leyp_runner import run_simulation
 
 
 def generate_validation_curve(
-    input_file_path: str, budget_min: float = 10000, budget_max: float = 200000, n_points: int = 20
+    input_file_path: str,
+    budget_min: float = 10000,
+    budget_max: float = 200000,
+    n_points: int = 20,
+    n_replicates: int = 1,
 ) -> tuple[list[float], list[float], list[float], list[float]]:
     """Generate validation curve data by varying budget with fixed trigger.
 
@@ -29,6 +33,7 @@ def generate_validation_curve(
         budget_min: Minimum budget to test ($)
         budget_max: Maximum budget to test ($)
         n_points: Number of budget points to evaluate
+        n_replicates: Stochastic replicates averaged at each budget point
 
     Returns:
         Tuple of 4 equal-length lists, all values in [0, 100]:
@@ -44,7 +49,8 @@ def generate_validation_curve(
 
     # Fixed seed ensures identical pipe initialization and stochastic events
     # across all budget points — the ONLY variable is the budget level.
-    # Without this, stochastic noise swamps the budget signal.
+    # Without this, stochastic noise swamps the budget signal.  Passed through
+    # run_simulation(seed=...) rather than seeding the global stream here.
     VALIDATION_SEED = 12345
 
     # Generate budget test points
@@ -53,13 +59,14 @@ def generate_validation_curve(
     # Run baseline simulation with zero budget to get maximum breaks
     print("Running baseline simulation (zero budget)...")
     try:
-        np.random.seed(VALIDATION_SEED)
         baseline_inv, baseline_risk, baseline_cip, baseline_emergency, baseline_breaks = run_simulation(
             use_mock_data=False,
             override_input_path=input_file_path,
             annual_budget=0.0,
             rehab_trigger=fixed_trigger,
             generate_report=True,
+            seed=VALIDATION_SEED,
+            n_replicates=n_replicates,
         )
 
         # Load pipe network to get total pipe statistics
@@ -82,13 +89,14 @@ def generate_validation_curve(
         print(f"Testing budget {i + 1}/{n_points}: ${budget:,.0f}")
 
         try:
-            np.random.seed(VALIDATION_SEED)
             inv_cost, risk_cost, cip_cost, emergency_cost, current_breaks = run_simulation(
                 use_mock_data=False,
                 override_input_path=input_file_path,
                 annual_budget=budget,
                 rehab_trigger=fixed_trigger,
                 generate_report=True,
+                seed=VALIDATION_SEED,
+                n_replicates=n_replicates,
             )
 
             # Use actual break counts and CIP cost estimates for metrics

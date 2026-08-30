@@ -22,7 +22,17 @@ genes:
 # Global multiplier for Risk = Length * CoF * This_Value
 avg_failure_cost_per_ft: 500.0
 
-# 5. ALGORITHM SETTINGS
+# 5. SIMULATION DETERMINISM
+# seed: base seed applied to every evaluation (common random numbers), so a
+#   given (seed, budget, trigger) reproduces exactly.  Set to null for an
+#   unseeded, non-reproducible run.
+# n_replicates: stochastic replicates averaged per evaluation.  1 is a single
+#   draw; raise it to average out simulation noise.
+simulation:
+  seed: 20260830
+  n_replicates: 1
+
+# 6. ALGORITHM SETTINGS
 algorithm:
   pop_size: 5
   n_offsprings: 3

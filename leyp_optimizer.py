@@ -63,6 +63,13 @@ class Water_LEYP_Problem(ElementwiseProblem):
 
     def __init__(self, config, input_file_path):
         genes = config["genes"]
+        sim = config.get("simulation", {}) or {}
+
+        # Common random numbers: every candidate is evaluated against the same
+        # stochastic draw, so differences in the objectives are attributable to
+        # the genes rather than to simulation noise.
+        self.seed = sim.get("seed")
+        self.n_replicates = int(sim.get("n_replicates", 1))
 
         super().__init__(
             n_var=2,  # Budget, Rehab_trigger
@@ -100,6 +107,8 @@ class Water_LEYP_Problem(ElementwiseProblem):
                 override_input_path=self.input_file,
                 annual_budget=budget,
                 rehab_trigger=rehab_trigger,
+                seed=self.seed,
+                n_replicates=self.n_replicates,
             )
         except Exception as e:
             print(f"[Optimizer Error] {e}")
@@ -186,6 +195,7 @@ def run_optimization():
     print(f"Parameters: Budget=${best['Budget']:,.0f} | Rehab_Trigger={best['Rehab_Trigger']:.2f}")
 
     # 2. Re-Run Simulation with Logging Enabled
+    sim_cfg = config.get("simulation", {}) or {}
     try:
         inv_cost, risk_cost, cip_cost, emergency_cost, total_breaks = run_simulation(
             use_mock_data=False,
@@ -194,6 +204,8 @@ def run_optimization():
             annual_budget=best["Budget"],
             rehab_trigger=best["Rehab_Trigger"],
             generate_report=True,  # <--- TRIGGERS THE REPORT
+            seed=sim_cfg.get("seed"),
+            n_replicates=int(sim_cfg.get("n_replicates", 1)),
         )
 
         print(f"Victory lap completed - Investment: ${inv_cost:,.0f}, Risk: ${risk_cost:,.0f}, Breaks: {total_breaks}")
@@ -208,7 +220,8 @@ def run_optimization():
             input_file_path=optimized_input_path,
             budget_min=config["genes"]["budget"]["min"],
             budget_max=config["genes"]["budget"]["max"],
-            n_points=15
+            n_points=15,
+            n_replicates=int(sim_cfg.get("n_replicates", 1)),
         )
 
         # Save validation curve plot
