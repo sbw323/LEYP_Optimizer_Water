@@ -21,6 +21,26 @@ COLUMN_MAP = {
 # ==========================================
 ALPHA = 0.15
 
+# Ceiling on the break count that feeds the LEYP term (1 + ALPHA * n_breaks).
+# The hazard elevation from break history saturates in practice: a main with
+# twenty repairs is not four times worse than one with ten.  Without a ceiling
+# the term is an unbounded positive feedback loop — each break raises hazard,
+# which produces more breaks — and it diverges in any run where pipes are not
+# renewed.  Renewal masked this: the treated network never accumulated enough
+# breaks on one pipe to run away, but an untreated baseline reached ~1e7
+# breaks/mile/year.  At the default cap the feedback tops out at 2.5x.
+LEYP_BREAK_FEEDBACK_CAP = 10
+
+# Condition penalty applied per break in a year (review finding C1).  Breaks
+# already influence the model twice — they raise future hazard through the
+# LEYP term and accumulate toward the segment failure rule — so this coupling
+# exists only to make a frequently-breaking pipe read as poor condition and
+# therefore become CIP-eligible.  It is floored above the failure threshold by
+# BREAK_DAMAGE_CONDITION_FLOOR so it cannot condemn a pipe on its own, which
+# would be a third independent failure path.
+BREAK_CONDITION_PENALTY = 0.3
+BREAK_DAMAGE_CONDITION_FLOOR = 1.05
+
 # Weibull Baseline (Water Materials)
 MATERIAL_PROPS = {
     "CI": {"beta": 1.8, "eta": 75, "base_mult": 1.3},
@@ -73,29 +93,60 @@ STANDARD_LIFE = {
 # ==========================================
 N_SEGMENTS_PER_PIPE = 4
 SEGMENT_BREAK_THRESHOLD = 3
-HAZARD_LENGTH_SCALE = 300.0
+
+# Length normalisation for the Poisson break intensity: a segment's expected
+# breaks are hazard * segment_length / HAZARD_LENGTH_SCALE.  This is a pure
+# units constant with no physical claim of its own, so it is the right knob to
+# calibrate the model's absolute break production against observed rates.
+#
+# Calibrated so a do-nothing run of this network (no CIP, no renewal, 100 yr)
+# produces 0.287 breaks/mile/year.  Anchor: Folkman (2018) national averages
+# weighted by this network's material mix give 0.077 breaks/mile/year across
+# all ages; an untreated network that is already 60% past design life and ages
+# a further century should sit several times above that.  Re-derive this value
+# if the inventory, the material parameters, or ALPHA change.
+HAZARD_LENGTH_SCALE = 1500.0
 SIMULATION_YEARS = 100
 
 # ==========================================
 # 6. COST PARAMETERS
 # ==========================================
 
+# Real discount rate applied to both objectives.  Without discounting a dollar
+# spent in year 100 counts the same as one spent today, which removes any
+# time-value reason to sequence work and lets the optimiser treat a distant
+# emergency as equivalent to an immediate one.  3% real is conventional for
+# water utility capital planning; set to 0.0 to recover undiscounted totals.
+DISCOUNT_RATE = 0.03
+
 # Annual Budget
 ANNUAL_BUDGET = 50000
-
-# Pipe failure replacement cost (legacy parameter)
-GLOBAL_COST_PER_FT = 500
 
 # Water Main Replacement Costs
 CIP_REPLACEMENT_COST_PER_INCH_FT = 120.00
 EMERGENCY_REPAIR_COST_PER_BREAK = 5000.00
-EMERGENCY_REPLACEMENT_COST_PER_FT = 800.00
+
+# Emergency replacement carries a premium over planned CIP work: mobilisation,
+# out-of-hours crews, service interruption, road reinstatement and the loss of
+# any opportunity to upsize or co-ordinate with other works.  At $5,000/ft
+# against CIP's $120/inch-ft this is roughly 6.9x for a 6-inch main and 3.5x
+# for a 12-inch one, in line with the 2-5x range typical of utility practice.
+# This rate is also the consequence term in ReplacementManager risk scoring;
+# because it enters both risk and cost uniformly it scales the objectives
+# without altering the replacement ranking.
+EMERGENCY_REPLACEMENT_COST_PER_FT = 5000.00
 DEFAULT_REPLACEMENT_MATERIAL = "HDPE"
 
 # ==========================================
 # 7. INTERVENTION TRIGGERS
 # ==========================================
 TRIGGERS = {"Rehab": 2.0}
+
+# Condition at or below which a pipe counts as inherited backlog in year 1.
+# Fixed deliberately rather than tied to the run's rehab trigger: the backlog
+# is a property of the inventory and must mean the same thing across every
+# strategy the optimizer evaluates.
+BACKLOG_CONDITION = 2.0
 
 # ==========================================
 # 8. ACTION CONSTANTS

@@ -13,18 +13,52 @@ skip_segmentation: True
 genes:
   budget: 
     min: 10000
-    max: 500000
+    # Raised from 500000 to match the README. The old ceiling could not express
+    # a solvent policy: $500k/yr over the horizon is $50M against $84.4M to
+    # renew this network once (review finding B5).
+    max: 2000000
   rehab_trigger: 
     min: 1.0
     max: 3.5
 
 # 4. ECONOMIC PARAMETERS
-# Global multiplier for Risk = Length * CoF * This_Value
-avg_failure_cost_per_ft: 500.0
+# Real annual discount rate applied to both objectives. Without it a dollar in
+# year 100 counts the same as one today. 0.0 recovers undiscounted totals.
+discount_rate: 0.03
 
-# 5. ALGORITHM SETTINGS
+# 5. SIMULATION DETERMINISM
+# seed: base seed applied to every evaluation (common random numbers), so a
+#   given (seed, budget, trigger) reproduces exactly.  Set to null for an
+#   unseeded, non-reproducible run.
+# n_replicates: stochastic replicates averaged per evaluation.  1 is a single
+#   draw; raise it to average out simulation noise.
+simulation:
+  seed: 20260830
+  # 5 replicates puts run-to-run spread at ~0.75% of the front's total-cost
+  # range (sd $2.9M against a $383M spread); a single draw is ~3.2%.
+  n_replicates: 5
+
+# 6. VALIDATION CURVE
+# Budget points swept from 0 to genes.budget.max. More points give a smoother
+# curve at linear cost (each point is n_replicates simulations).
+validation:
+  n_points: 15
+
+# 7. STRATEGY SELECTION
+# How one strategy is chosen from the Pareto front for the action plan.
+#   min_total_cost - lowest investment + risk (both are dollars, so this is a
+#                    real quantity, but it weights the two streams equally)
+#   knee           - closest to the ideal point once both objectives are
+#                    normalised; the best-balanced trade-off
+# The run prints what the other rule would have chosen either way.
+selection: min_total_cost
+
+# 8. ALGORITHM SETTINGS
+# Sized for a noisy two-gene objective: ~510 evaluations against the previous
+# 50, which was too few to resolve a front from simulation noise. At roughly
+# 1.3s per evaluation (5 replicates) a full run takes about 11 minutes.
 algorithm:
-  pop_size: 5
-  n_offsprings: 3
-  n_gen: 15
+  pop_size: 32
+  n_offsprings: 16
+  n_gen: 30
   seed: 895

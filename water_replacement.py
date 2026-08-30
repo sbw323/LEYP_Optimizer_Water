@@ -83,6 +83,30 @@ class ReplacementManager:
 
         return consequence / safe_ttf
 
+    def get_priority_score(self, pipe) -> float:
+        """Rank pipes by risk reduction per dollar of CIP spend.
+
+        Ranking on annualized risk alone (review finding B2) is
+        length-dominant: risk scales with length, so the longest — and
+        therefore least affordable — pipes sort to the top, where they
+        consume or strand the whole annual budget.
+
+        Dividing by replacement cost makes the ranking a benefit/cost ratio.
+        Length appears in both terms and cancels, so priority is driven by
+        what actually earns the money: consequence of failure, imminence of
+        failure, and how cheap the pipe is to renew per foot.
+
+        Args:
+            pipe: Pipe object
+
+        Returns:
+            Annualized risk per dollar of replacement cost
+        """
+        cost = self.calculate_cost(pipe)
+        if cost <= 0:
+            return float("inf")  # Free replacement always wins the ranking.
+        return self.get_annualized_risk(pipe) / cost
+
     def run_year(self, network: list, year: int) -> dict[str, Any]:
         """
         Execute annual replacement decisions within budget constraints.
@@ -94,33 +118,51 @@ class ReplacementManager:
         Returns:
             Dictionary with keys 'Year', 'Spend', 'Count'
         """
-        # Filter eligible pipes (condition <= threshold, not failed)
-        eligible_pipes = []
-        for pipe in network:
-            if (pipe.current_condition <= self.rehab_trigger and
-                pipe.current_condition > 1.001):  # Exclude failed pipes
-                eligible_pipes.append(pipe)
+        # Eligible = at or below the trigger.  Pipes at the failure floor stay
+        # eligible (review finding B3): excluding them handed every age-out
+        # pipe to the emergency stream, which is the work a CIP programme
+        # exists to capture.
+        eligible_pipes = [
+            pipe for pipe in network if pipe.current_condition <= self.rehab_trigger
+        ]
 
-        # Sort by annualized risk (highest first)
-        eligible_pipes.sort(key=self.get_annualized_risk, reverse=True)
+        # Sort by risk reduction per dollar (highest first)
+        eligible_pipes.sort(key=self.get_priority_score, reverse=True)
 
-        # Execute replacements within budget
         total_spend = 0.0
         replacement_count = 0
+        unfundable_count = 0
+        unfundable_length = 0.0
+        deferred_count = 0
 
         for pipe in eligible_pipes:
             cost = self.calculate_cost(pipe)
+
+            # A pipe costing more than a whole year's budget can never be
+            # funded in one year.  Report it rather than letting it block the
+            # queue; it is a multi-year programming problem, not a ranking one.
+            if cost > self.budget:
+                unfundable_count += 1
+                unfundable_length += pipe.length
+                continue
+
             if total_spend + cost <= self.budget:
                 self.execute_replacement(pipe, year)
                 total_spend += cost
                 replacement_count += 1
             else:
-                break  # Budget exhausted
+                # Skip, do not stop: cheaper pipes further down the ranking can
+                # still use the remaining budget (review finding B1).
+                deferred_count += 1
 
         return {
             'Year': year,
             'Spend': total_spend,
-            'Count': replacement_count
+            'Count': replacement_count,
+            'Eligible': len(eligible_pipes),
+            'Deferred': deferred_count,
+            'Unfundable': unfundable_count,
+            'Unfundable_Length': unfundable_length,
         }
 
     def execute_replacement(self, pipe, year: int) -> None:
@@ -131,10 +173,14 @@ class ReplacementManager:
             pipe: Pipe object to replace
             year: Current simulation year
         """
-        # Record pre-replacement state for logging
+        # Record pre-replacement state for logging.  The ranking values must be
+        # captured BEFORE the reset: computing them afterwards described the
+        # brand-new pipe instead of the decision that was made.
         pre_condition = pipe.current_condition
         original_material = pipe.material
         cost = self.calculate_cost(pipe)
+        annualized_risk = self.get_annualized_risk(pipe)
+        priority = self.get_priority_score(pipe)
 
         # Reset pipe to new condition
         pipe.current_condition = 6.0
@@ -150,9 +196,6 @@ class ReplacementManager:
         pipe.reset_physics_params()
         pipe.update_leyp_state()
 
-        # Calculate priority (annualized risk used for ranking)
-        priority = self.get_annualized_risk(pipe)
-
         # Log the action
         self.action_log.append({
             'Year': year,
@@ -161,7 +204,8 @@ class ReplacementManager:
             'PreCondition': pre_condition,
             'PostCondition': 6.0,
             'Condition_Before': pre_condition,  # Alias for validator compatibility
-            'Priority': priority,  # Annualized risk used for ranking
+            'Priority': priority,  # Risk reduction per dollar, used for ranking
+            'Annualized_Risk': annualized_risk,
             'Material': original_material,  # Original material
             'NewMaterial': self.replacement_material,  # Replacement material
             'Cost': cost,
