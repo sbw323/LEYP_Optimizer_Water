@@ -176,11 +176,44 @@ def test_cost_effectiveness_is_reported(curve):
         assert col in curve.columns
 
 
-def test_cost_effectiveness_is_avoided_over_spent(curve):
+def test_paired_ratio_helpers_pair_by_replicate():
+    """Each replicate is compared with the same-seeded baseline replicate.
+
+    Pairing is what removes most of the between-world variance; a plain
+    ratio of means would not.
+    """
+    from water_validation import _paired_ratios, _ratio_mean, _ratio_sd
+
+    baseline = [100.0, 200.0]
+    runs = [
+        {"risk_cost": 90.0, "investment_cost": 5.0},    # (100-90)/5  = 2.0
+        {"risk_cost": 150.0, "investment_cost": 10.0},  # (200-150)/10 = 5.0
+    ]
+    assert list(_paired_ratios(baseline, runs)) == pytest.approx([2.0, 5.0])
+    assert _ratio_mean(baseline, runs) == pytest.approx(3.5)
+    assert _ratio_sd(baseline, runs) == pytest.approx(1.5)
+
+
+def test_paired_ratio_helpers_skip_unfunded_replicates():
+    from water_validation import _paired_ratios, _ratio_mean
+
+    assert _paired_ratios([100.0], [{"risk_cost": 90.0, "investment_cost": 0.0}]).size == 0
+    assert np.isnan(_ratio_mean([100.0], [{"risk_cost": 90.0, "investment_cost": 0.0}]))
+
+
+def test_cost_effectiveness_tracks_avoided_over_spent(curve):
+    """The paired mean should stay close to the ratio of the reported totals.
+
+    Not equal — the paired estimator is a mean of ratios, not a ratio of
+    means — but a large divergence would mean the two are measuring
+    different things.
+    """
     funded = curve[curve["cip_spend_pv"] > 0]
     assert not funded.empty
-    expected = funded["risk_avoided_pv"] / funded["cip_spend_pv"]
-    assert funded["cost_effectiveness"].to_numpy() == pytest.approx(expected.to_numpy())
+    ratio_of_means = funded["risk_avoided_pv"] / funded["cip_spend_pv"]
+    assert funded["cost_effectiveness"].to_numpy() == pytest.approx(
+        ratio_of_means.to_numpy(), rel=0.25
+    )
 
 
 def test_zero_budget_has_no_cost_effectiveness(curve):
