@@ -684,7 +684,13 @@ def _generate_reports(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="LEYP-Water single simulation run")
+    parser = argparse.ArgumentParser(
+        description=(
+            "LEYP-Water: run ONE simulation at a fixed budget and trigger. "
+            "This does not search for a strategy - to run the NSGA-II "
+            "optimization over generations, use: python leyp_optimizer.py"
+        )
+    )
     parser.add_argument("--input", type=str, default=None,
                         help="Path to pipe inventory CSV (default: leyp_config.REAL_DATA_PATH)")
     parser.add_argument("--budget", type=float, default=None,
@@ -702,6 +708,9 @@ if __name__ == "__main__":
     generate = args.output_dir is not None
 
     print("=== LEYP-Water: Single Simulation Run ===")
+    print("  (one fixed strategy, no optimization -- for the NSGA-II search")
+    print("   over generations run: python leyp_optimizer.py)")
+    print()
     print(f"  Budget:     {args.budget if args.budget else 'default (' + str(ANNUAL_BUDGET) + ')'}")
     print(f"  Trigger:    {args.trigger if args.trigger else 'default (' + str(TRIGGERS['Rehab']) + ')'}")
     print(f"  Input:      {args.input if args.input else 'default'}")
@@ -723,14 +732,24 @@ if __name__ == "__main__":
 
         if generate:
             inv, risk, cip, emerg, breaks = result
+            # The tuple carries present values; re-read the undiscounted cash
+            # from the summary the run just wrote.
+            _summary = pd.read_csv(
+                os.path.join(args.output_dir, "cost_summary.csv")
+            ).iloc[0]
+            nominal_inv = _summary["Nominal_Investment"]
+            nominal_risk = _summary["Nominal_Risk"]
             total = inv + risk
-            print("\n--- Results (100-year horizon) ---")
-            print(f"  Investment Cost (CIP):       ${inv:>14,.0f}")
-            print(f"  Risk Cost (repairs+emerg):   ${risk:>14,.0f}")
-            print(f"    - Emergency repairs:       ${(risk - emerg):>14,.0f}")
-            print(f"    - Emergency replacements:  ${emerg:>14,.0f}")
-            print(f"  Total Cost:                  ${total:>14,.0f}")
+            print(f"\n--- Results (100-year horizon, present value @ {DISCOUNT_RATE:.0%} real) ---")
+            print(f"  Investment (CIP)  PV:        ${inv:>14,.0f}")
+            print(f"  Risk (repairs+emergency) PV: ${risk:>14,.0f}")
+            print(f"  Total Cost        PV:        ${total:>14,.0f}")
             print(f"  Total Breaks:                 {breaks:>14,.1f}")
+            print("\n  Undiscounted cash over the horizon:")
+            print(f"    Investment (CIP):          ${nominal_inv:>14,.0f}")
+            print(f"    Emergency repairs:         ${(nominal_risk - emerg):>14,.0f}")
+            print(f"    Emergency replacements:    ${emerg:>14,.0f}")
+            print(f"    Total:                     ${nominal_inv + nominal_risk:>14,.0f}")
             if args.output_dir:
                 print(f"\n  Reports written to: {args.output_dir}/")
 
@@ -739,11 +758,11 @@ if __name__ == "__main__":
         else:
             inv, risk = result
             total = inv + risk
-            print("\n--- Results (100-year horizon) ---")
-            print(f"  Investment Cost: ${inv:>14,.0f}")
-            print(f"  Risk Cost:       ${risk:>14,.0f}")
-            print(f"  Total Cost:      ${total:>14,.0f}")
-            print("\n  (pass --output-dir <path> for detailed action log)")
+            print(f"\n--- Results (100-year horizon, present value @ {DISCOUNT_RATE:.0%} real) ---")
+            print(f"  Investment Cost PV: ${inv:>14,.0f}")
+            print(f"  Risk Cost       PV: ${risk:>14,.0f}")
+            print(f"  Total Cost      PV: ${total:>14,.0f}")
+            print("\n  (pass --output-dir <path> for the action log and undiscounted cash)")
 
     except Exception as e:
         print(f"\n[ERROR] Simulation failed: {e}")
