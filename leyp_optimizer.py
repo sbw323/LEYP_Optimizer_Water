@@ -33,7 +33,12 @@ from checkpoint import (
 from leyp_config import NSGA2_CHECKPOINT_EVERY_N_GEN, NSGA2_CHECKPOINT_PATH
 from leyp_preprocessor import preprocess_network
 from leyp_runner import run_simulation
-from water_validation import generate_validation_curve, plot_validation_curve, save_validation_data
+from water_validation import (
+    generate_validation_curve,
+    plot_validation_curve,
+    save_validation_data,
+    summarize_validation,
+)
 
 CONFIG_FILE = "optimizer_config.yaml"
 
@@ -271,34 +276,23 @@ def run_optimization():
     # --- VALIDATION CURVE GENERATION ---
     print("\n--- Generating Validation Curve ---")
     try:
-        pct_replaced_by_number, pct_avoided_by_number, pct_replaced_by_length, pct_avoided_by_length = generate_validation_curve(
+        curve = generate_validation_curve(
             input_file_path=optimized_input_path,
-            budget_min=config["genes"]["budget"]["min"],
+            budget_min=0.0,
             budget_max=config["genes"]["budget"]["max"],
-            n_points=15,
+            n_points=config.get("validation", {}).get("n_points", 15),
             n_replicates=int(sim_cfg.get("n_replicates", 1)),
         )
 
-        # Save validation curve plot
-        validation_plot_path = os.path.join(output_dir, "validation_curve.png")
-        plot_validation_curve(
-            pct_replaced_by_number,
-            pct_avoided_by_number,
-            pct_replaced_by_length,
-            pct_avoided_by_length,
-            validation_plot_path
-        )
+        plot_validation_curve(curve, os.path.join(output_dir, "validation_curve.png"))
+        save_validation_data(curve, os.path.join(output_dir, "validation_data.csv"))
 
-        # Save validation data
-        validation_data_path = os.path.join(output_dir, "validation_data.csv")
-        save_validation_data(
-            pct_replaced_by_number,
-            pct_avoided_by_number,
-            pct_replaced_by_length,
-            pct_avoided_by_length,
-            validation_data_path
-        )
-
+        checks = summarize_validation(curve)
+        print("  Curve reach: %.1f%% of pipes, %.1f%% of network length"
+              % (checks["max_pct_replaced_by_number"], checks["max_pct_replaced_by_length"]))
+        print("  Above diagonal over first 50%%: count %s, length %s"
+              % (checks["above_diagonal_first_50_by_number"],
+                 checks["above_diagonal_first_50_by_length"]))
         print("Validation curve generation completed successfully")
 
     except Exception as e:

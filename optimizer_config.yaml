@@ -37,7 +37,13 @@ simulation:
   # range (sd $2.9M against a $383M spread); a single draw is ~3.2%.
   n_replicates: 5
 
-# 6. STRATEGY SELECTION
+# 6. VALIDATION CURVE
+# Budget points swept from 0 to genes.budget.max. More points give a smoother
+# curve at linear cost (each point is n_replicates simulations).
+validation:
+  n_points: 15
+
+# 7. STRATEGY SELECTION
 # How one strategy is chosen from the Pareto front for the action plan.
 #   min_total_cost - lowest investment + risk (both are dollars, so this is a
 #                    real quantity, but it weights the two streams equally)
@@ -46,7 +52,7 @@ simulation:
 # The run prints what the other rule would have chosen either way.
 selection: min_total_cost
 
-# 7. ALGORITHM SETTINGS
+# 8. ALGORITHM SETTINGS
 # Sized for a noisy two-gene objective: ~510 evaluations against the previous
 # 50, which was too few to resolve a front from simulation noise. At roughly
 # 1.3s per evaluation (5 replicates) a full run takes about 11 minutes.

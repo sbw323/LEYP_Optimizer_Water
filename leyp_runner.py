@@ -18,6 +18,7 @@ import pandas as pd
 from checkpoint import safe_write_file
 from leyp_config import (
     ACTION_BREAK_EVENT,
+    ACTION_CIP_REPLACEMENT,
     BACKLOG_CONDITION,
     ACTION_EMERGENCY_REPLACEMENT,
     ANNUAL_BUDGET,
@@ -305,9 +306,26 @@ def _simulate_once(
     # --- COMBINE ACTION LOGS ---
     all_actions.extend(replacement_manager.action_log)
 
+    # Renewal footprint, counted from the action log rather than inferred.
+    # Distinct pipes, because a pipe can be renewed more than once across the
+    # horizon and "% of the network replaced" must stay bounded by 100%.
+    lengths = {p.id: p.length for p in network}
+    cip_pipes = {a["PipeID"] for a in all_actions if a["Action"] == ACTION_CIP_REPLACEMENT}
+    emergency_pipes = {
+        a["PipeID"] for a in all_actions if a["Action"] == ACTION_EMERGENCY_REPLACEMENT
+    }
+    emergency_length = sum(
+        a["Length"] for a in all_actions if a["Action"] == ACTION_EMERGENCY_REPLACEMENT
+    )
+
     return {
         "investment_cost": cip_cost,
         "risk_cost": repair_cost + emergency_cost,
+        "cip_pipes": len(cip_pipes),
+        "cip_pipe_length": sum(lengths[i] for i in cip_pipes),
+        "emergency_pipes": len(emergency_pipes),
+        "emergency_replacement_length": emergency_length,
+        "network_length": sum(lengths.values()),
         "cip_cost": cip_cost,
         "repair_cost": repair_cost,
         "emergency_cost": emergency_cost,
@@ -322,6 +340,61 @@ def _simulate_once(
         "backlog_never_cleared": len(backlog_pending),
         "network_pipes": len(network),
     }
+
+
+def simulate(
+    input_path: str | None = None,
+    annual_budget: float | None = None,
+    rehab_trigger: float | None = None,
+    seed: int | None = None,
+    n_replicates: int = 1,
+    no_intervention: bool = False,
+) -> dict:
+    """Run the simulation and return the full result, not a fixed tuple.
+
+    run_simulation returns a 2- or 5-tuple for backward compatibility, which
+    cannot carry the renewal footprint or per-replicate detail that the
+    validation curve needs.  This is the richer API.
+
+    Args:
+        input_path: Pipe inventory CSV; defaults to the configured path.
+        annual_budget: Annual CIP budget in dollars.
+        rehab_trigger: Condition threshold for CIP eligibility.
+        seed: Base seed; replicate *i* uses ``seed + i``.
+        n_replicates: Number of stochastic replicates.
+        no_intervention: Run a do-nothing baseline (no CIP, no renewal).
+
+    Returns:
+        Mean values across replicates, plus "replicates", the list of
+        per-replicate results, for computing spread.
+    """
+    from leyp_config import REAL_DATA_PATH
+
+    raw_df = _load_network_frame(input_path if input_path else REAL_DATA_PATH)
+    use_budget = annual_budget if annual_budget is not None else ANNUAL_BUDGET
+    use_trigger = rehab_trigger if rehab_trigger is not None else TRIGGERS["Rehab"]
+
+    if n_replicates < 1:
+        raise ValueError(f"n_replicates must be >= 1, got {n_replicates}")
+
+    replicates = [
+        _simulate_once(
+            raw_df,
+            annual_budget=use_budget,
+            rehab_trigger=use_trigger,
+            seed=None if seed is None else seed + i,
+            no_intervention=no_intervention,
+        )
+        for i in range(n_replicates)
+    ]
+
+    numeric = [
+        k for k, v in replicates[0].items() if isinstance(v, (int, float))
+    ]
+    result = {k: float(np.mean([r[k] for r in replicates])) for k in numeric}
+    result["replicates"] = replicates
+    result["n_pipes"] = len(raw_df)
+    return result
 
 
 def run_simulation(
@@ -600,37 +673,8 @@ if __name__ == "__main__":
             if args.output_dir:
                 print(f"\n  Reports written to: {args.output_dir}/")
 
-                # --- Validation Curve ---
-                print("\n--- Generating Validation Curve ---")
-                try:
-                    from water_validation import (
-                        generate_validation_curve,
-                        plot_validation_curve,
-                        save_validation_data,
-                    )
-                    from leyp_config import REAL_DATA_PATH
+                print("\n  (run leyp_optimizer.py to regenerate the validation curve)")
 
-                    val_input = args.input if args.input else REAL_DATA_PATH
-                    val_budget_max = (args.budget if args.budget else ANNUAL_BUDGET) * 10
-
-                    pct_rn, pct_an, pct_rl, pct_al = generate_validation_curve(
-                        input_file_path=val_input,
-                        budget_min=0,
-                        budget_max=val_budget_max,
-                        n_points=10,
-                    )
-
-                    if pct_rn:  # Non-empty results
-                        plot_path = os.path.join(args.output_dir, "validation_curve.png")
-                        plot_validation_curve(pct_rn, pct_an, pct_rl, pct_al, plot_path)
-
-                        data_path = os.path.join(args.output_dir, "validation_data.csv")
-                        save_validation_data(pct_rn, pct_an, pct_rl, pct_al, data_path)
-                    else:
-                        print("  Validation curve returned empty results.")
-
-                except Exception as e:
-                    print(f"  Error generating validation curve: {e}")
         else:
             inv, risk = result
             total = inv + risk
