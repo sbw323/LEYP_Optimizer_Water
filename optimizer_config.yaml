@@ -16,7 +16,7 @@ genes:
     # Raised from 500000 to match the README. The old ceiling could not express
     # a solvent policy: $500k/yr over the horizon is $50M against $84.4M to
     # renew this network once (review finding B5).
-    max: 2000000
+    max: 20000000
   rehab_trigger: 
     min: 1.0
     max: 3.5
