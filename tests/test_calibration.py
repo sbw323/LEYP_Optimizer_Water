@@ -113,15 +113,40 @@ def test_untreated_hazard_model_is_stable(untreated):
     assert rate < 5.0, f"hazard model diverging: {rate:.3g} breaks/mile/year"
 
 
-def test_untreated_break_rate_is_defensible(untreated):
-    """Phase 4 gate: calibrated against this network's age and material mix.
+@pytest.fixture(scope="module")
+def window_rate():
+    """Untreated break rate over the calibration window: today's network."""
+    from leyp_config import CALIBRATION_WINDOW_YEARS as W
+    from leyp_runner import simulate
 
-    Anchor: Folkman (2018) national averages weighted by this material mix
-    give 0.077 breaks/mile/year across all ages. An untreated network already
-    60% past design life should sit several times above that.
+    r = simulate(
+        REAL_INVENTORY, annual_budget=0.0, rehab_trigger=3.5,
+        seed=20260830, n_replicates=5, no_intervention=True, horizon_years=W,
+    )
+    return r["total_breaks"] / (NETWORK_MILES * W)
+
+
+def test_calibration_window_rate_is_defensible(window_rate):
+    """HAZARD_LENGTH_SCALE is tuned on a short untreated window of the
+    inventory as it stands, which is what a published breaks/mile/year
+    statistic describes. Anchor: Folkman (2018) national averages weighted by
+    this material mix give 0.077 across all ages; a network already 60% past
+    design life should sit several times above that.
+    """
+    assert 0.15 <= window_rate <= 0.40, f"{window_rate:.3f} outside the target band"
+
+
+def test_long_untreated_run_stays_finite(untreated, window_rate):
+    """The 100-year do-nothing run is a stability check, not a target.
+
+    Under wear-out most of that run is spent with the whole network far past
+    average life at the saturated multiplier, so its level is not comparable
+    to any real break statistic. It must stay finite, and it should exceed
+    the window rate: a network left alone for a century breaks more, not less.
     """
     rate = untreated[4] / (NETWORK_MILES * 100)
-    assert 0.15 <= rate <= 0.40, f"{rate:.3f} breaks/mile/year outside target band"
+    assert rate < 5.0, f"hazard model diverging: {rate:.3g}"
+    assert rate >= window_rate
 
 
 def test_intervention_reduces_breaks(untreated):
@@ -139,7 +164,7 @@ def test_intervention_reduces_breaks(untreated):
 
 def test_hazard_scale_is_the_calibrated_value():
     """Pin the calibrated constant so a silent edit fails the suite."""
-    assert HAZARD_LENGTH_SCALE == 1500.0
+    assert HAZARD_LENGTH_SCALE == 4300.0
 
 
 # --- Break-driven failure at adequate funding ----------------------------------
@@ -169,11 +194,11 @@ def test_break_events_exceed_emergencies_when_funding_is_adequate(tmp_path):
     assert break_events > summary["Emergency_Count"]
 
 
-def test_unfunded_age_out_falls_as_budget_rises(tmp_path):
-    """Degradation emergencies must be explainable as a funding shortfall."""
+def test_emergency_replacements_fall_as_budget_rises(tmp_path):
+    """Planned renewal must displace break-driven failures."""
     import pandas as pd
 
-    def degradation_emergencies(budget):
+    def emergencies(budget):
         out = tmp_path / f"b{int(budget)}"
         run_simulation(
             override_input_path=REAL_INVENTORY,
@@ -184,28 +209,29 @@ def test_unfunded_age_out_falls_as_budget_rises(tmp_path):
             seed=20260830,
             n_replicates=3,
         )
-        return pd.read_csv(out / "cost_summary.csv").iloc[0]["Emergency_degradation"]
+        return pd.read_csv(out / "cost_summary.csv").iloc[0]["Emergency_Count"]
 
-    assert degradation_emergencies(3_000_000.0) < degradation_emergencies(100_000.0)
+    assert emergencies(2_000_000.0) < emergencies(100_000.0)
 
 
 # --- Planning realism: CIP cannot intercept a pipe the year it fails ----------
 
-def test_cip_decides_on_last_assessment_condition(pipe_attrs, tmp_path):
-    """CIP must act on condition as observed before the year's degradation.
+def test_cip_decides_on_last_assessment_condition(tmp_path, monkeypatch):
+    """CIP must act on condition as observed before the year's events.
 
-    Deciding after degradation let the programme intercept a pipe in the very
-    year it crossed the failure floor — perfect foresight plus same-year
-    execution, which no capital programme can schedule, and which made
-    replacing at the last possible moment look optimal.
+    Deciding after the year's breaks would let the programme intercept a pipe
+    in the very year it fails - perfect foresight plus same-year execution,
+    which no capital programme can schedule. A pipe that fails this year must
+    appear as an emergency replacement, not as a CIP replacement.
     """
     import pandas as pd
 
+    import leyp_core
     from leyp_runner import run_simulation
 
-    # One pipe that starts just above the floor. With unlimited budget and a
-    # trigger below its starting condition, CIP cannot see it this year, so
-    # it must age out into the emergency stream rather than be intercepted.
+    # A main far past average life (wear-out saturated) with hazard made
+    # effectively certain, so a segment fails in year 1.
+    monkeypatch.setattr(leyp_core, "HAZARD_LENGTH_SCALE", 1e-6)
     df = pd.DataFrame(
         [{"PipeID": "X", "Material": "GI", "Age": 200, "Length": 100.0,
           "Diameter": 6, "Condition": 1, "CoF_Value": 1}]
@@ -223,7 +249,9 @@ def test_cip_decides_on_last_assessment_condition(pipe_attrs, tmp_path):
         seed=61,
     )
     plan = pd.read_csv(out / "Optimal_Action_Plan.csv")
-    assert (plan["Action"] == "Emergency_Replacement").any()
+    year1 = plan[plan["Year"] == 1]
+    assert (year1["Action"] == "Emergency_Replacement").any()
+    assert not (year1["Action"] == "CIP_Replacement").any()
 
 
 def test_last_moment_replacement_is_not_optimal(tmp_path):

@@ -29,6 +29,7 @@ from leyp_config import (
     N_SEGMENTS_PER_PIPE,
     SIMULATION_YEARS,
     TRIGGERS,
+    WEAROUT_ONSET_LIFE_RATIO,
 )
 from leyp_core import Pipe, VirtualSegment
 from water_replacement import ReplacementManager
@@ -37,10 +38,12 @@ FEET_PER_MILE = 5280.0
 
 # Root causes recorded for every emergency replacement.  Kept as constants so
 # the diagnostics writer and the tests agree on spelling.
-CAUSE_DEGRADATION = "degradation"       # condition decayed past the failure floor
-CAUSE_BREAK_FAILURE = "break_failure"   # a segment reached SEGMENT_BREAK_THRESHOLD
-CAUSE_BREAK_DAMAGE = "break_damage"     # break damage pushed condition past the floor
-EMERGENCY_CAUSES = (CAUSE_DEGRADATION, CAUSE_BREAK_FAILURE, CAUSE_BREAK_DAMAGE)
+# The one and only route to emergency replacement: a segment reached
+# SEGMENT_BREAK_THRESHOLD breaks.  Reaching the condition floor is not a cause;
+# a worn-out pipe stays in service, CIP-eligible and breaking under the wear-out
+# hazard, until it is renewed or a segment fails.
+CAUSE_BREAK_FAILURE = "break_failure"
+EMERGENCY_CAUSES = (CAUSE_BREAK_FAILURE,)
 
 
 def _load_network_frame(target_file: str) -> pd.DataFrame:
@@ -79,8 +82,9 @@ def _simulate_once(
     seed: int | None = None,
     no_intervention: bool = False,
     discount_rate: float | None = None,
+    horizon_years: int | None = None,
 ) -> dict:
-    """Run a single 100-year replicate.
+    """Run a single replicate over the horizon.
 
     Args:
         raw_df: Pipe inventory frame.
@@ -92,6 +96,10 @@ def _simulate_once(
             no emergency renewal, with pipes left in service accruing breaks.
             A zero budget alone is not a do-nothing baseline, because
             emergency replacement still renews the network for free.
+        discount_rate: Real annual discount rate; defaults to
+            leyp_config.DISCOUNT_RATE, and 0.0 disables discounting.
+        horizon_years: Simulation length; defaults to SIMULATION_YEARS.  Short
+            horizons are used for calibration windows.
 
     Returns:
         Dict of cost totals, the combined action log, and per-year diagnostics.
@@ -100,6 +108,7 @@ def _simulate_once(
         np.random.seed(seed)
 
     rate = DISCOUNT_RATE if discount_rate is None else discount_rate
+    years = SIMULATION_YEARS if horizon_years is None else int(horizon_years)
 
     network = _build_network(raw_df)
     replacement_manager = ReplacementManager(budget=annual_budget, rehab_trigger=rehab_trigger)
@@ -187,6 +196,7 @@ def _simulate_once(
                 "Material": original_material,
                 "NewMaterial": DEFAULT_REPLACEMENT_MATERIAL,
                 "Cause": cause,
+                "Life_Ratio": pipe.life_ratio(year),
         }
         if _tag_backlog(action, pipe, "emergency"):
             backlog_emergency_cost += cost
@@ -207,7 +217,7 @@ def _simulate_once(
         pipe.reset_physics_params()
         pipe.update_leyp_state()
 
-    for year in range(1, SIMULATION_YEARS + 1):
+    for year in range(1, years + 1):
         year_emergency = {}
         year_breaks = 0
         year_break_events = 0
@@ -246,17 +256,22 @@ def _simulate_once(
                 if _tag_backlog(action, by_id[action["PipeID"]], "cip"):
                     year_backlog_cip += 1
 
-        # 2. DEGRADE — apply natural aging, after the year's plan is set
+        # 2. DEGRADE — apply natural aging, after the year's plan is set.
+        # Reaching the condition floor has no direct consequence here: a
+        # worn-out pipe stays in service and keeps breaking under the wear-out
+        # hazard until CIP renews it or a segment fails (step 3).
         for pipe in network:
             pipe.degrade()
 
-        if not no_intervention:
-            # 3. EMERGENCY REPLACEMENT — pipes the plan did not reach in time
-            for pipe in network:
-                if pipe.current_condition <= 1.001:
-                    _emergency_replace(pipe, year, CAUSE_DEGRADATION)
+        pipes_at_floor = 0
+        floor_below_onset = 0
+        for pipe in network:
+            if pipe.current_condition <= 1.001:
+                pipes_at_floor += 1
+                if pipe.life_ratio(year) < WEAROUT_ONSET_LIFE_RATIO:
+                    floor_below_onset += 1
 
-        # 4. BREAK SIMULATION AND EMERGENCY RESPONSE
+        # 3. BREAK SIMULATION AND EMERGENCY RESPONSE
         for pipe in network:
             pre_break_condition = pipe.current_condition
             sim_result = pipe.simulate_year(year)
@@ -288,14 +303,11 @@ def _simulate_once(
                     }
                 )
 
-            # Handle pipe failure from break accumulation.  Under
-            # no_intervention the pipe is left in service and keeps breaking,
-            # which is what makes the baseline a true do-nothing case.
-            if not no_intervention and (
-                sim_result["failed"] or pipe.current_condition <= 1.001
-            ):
-                cause = CAUSE_BREAK_FAILURE if sim_result["failed"] else CAUSE_BREAK_DAMAGE
-                _emergency_replace(pipe, year, cause)
+            # Emergency replacement follows a segment failure and nothing else.
+            # Under no_intervention the pipe is left in service and keeps
+            # breaking, which is what makes the baseline a true do-nothing case.
+            if not no_intervention and sim_result["failed"]:
+                _emergency_replace(pipe, year, CAUSE_BREAK_FAILURE)
 
         # Discount the year's spend to present value.  Costs are treated as
         # falling at year end, so year 1 is already discounted one period.
@@ -324,6 +336,8 @@ def _simulate_once(
             "Backlog_CIP": year_backlog_cip,
             "Backlog_Emergency": year_emergency.get("backlog", 0),
             "Backlog_Remaining": len(backlog_pending),
+            "Pipes_At_Floor": pipes_at_floor,
+            "Floor_Pipes_Below_Onset": floor_below_onset,
             "Eligible": cip_report["Eligible"],
             "Deferred": cip_report["Deferred"],
             "Unfundable": cip_report["Unfundable"],
@@ -386,6 +400,7 @@ def simulate(
     n_replicates: int = 1,
     no_intervention: bool = False,
     discount_rate: float | None = None,
+    horizon_years: int | None = None,
 ) -> dict:
     """Run the simulation and return the full result, not a fixed tuple.
 
@@ -422,6 +437,7 @@ def simulate(
             seed=None if seed is None else seed + i,
             no_intervention=no_intervention,
             discount_rate=discount_rate,
+            horizon_years=horizon_years,
         )
         for i in range(n_replicates)
     ]
@@ -446,6 +462,7 @@ def run_simulation(
     n_replicates: int = 1,
     no_intervention: bool = False,
     discount_rate: float | None = None,
+    horizon_years: int | None = None,
 ) -> tuple:
     """Run the 100-year replacement simulation.
 
@@ -499,6 +516,7 @@ def run_simulation(
             seed=None if seed is None else seed + i,
             no_intervention=no_intervention,
             discount_rate=discount_rate,
+            horizon_years=horizon_years,
         )
         for i in range(n_replicates)
     ]
@@ -532,6 +550,19 @@ def run_simulation(
         return investment_cost, risk_cost, cip_cost, emergency_cost, total_breaks
 
     return investment_cost, risk_cost
+
+
+def _mean_life_ratio_at_emergency(actions: list) -> float:
+    """Average age-to-average-life ratio of pipes at emergency replacement.
+
+    Above 1.0 means the pipes that fail are, on average, past their average
+    life — the wear-out term doing its job.  NaN when there were none.
+    """
+    ratios = [
+        a["Life_Ratio"] for a in actions
+        if a["Action"] == ACTION_EMERGENCY_REPLACEMENT and "Life_Ratio" in a
+    ]
+    return float(np.mean(ratios)) if ratios else float("nan")
 
 
 def _years_to_clear_backlog(yearly_df: pd.DataFrame) -> float:
@@ -652,6 +683,11 @@ def _generate_reports(
         "Yr1_2_Emergency_Count": int(early),
         "Max_Annual_Emergency_Count": int(yearly_df["Emergency_Count"].max()),
         "Mean_Unfundable_Per_Year": float(yearly_df["Unfundable"].mean()),
+        # --- End-of-life exposure: pipes left at the condition floor ---
+        "Floor_Pipe_Years": int(yearly_df["Pipes_At_Floor"].sum()),
+        "Max_Pipes_At_Floor": int(yearly_df["Pipes_At_Floor"].max()),
+        "Floor_Pipe_Years_Below_Onset": int(yearly_df["Floor_Pipes_Below_Onset"].sum()),
+        "Mean_Life_Ratio_At_Emergency": _mean_life_ratio_at_emergency(all_actions),
         "N_Replicates": len(replicates),
         "Total_Cost_SD": float(np.std(totals)) if len(replicates) > 1 else 0.0,
         # --- Inherited backlog (A3): eligible for replacement in year 1 ---

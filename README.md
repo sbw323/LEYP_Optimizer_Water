@@ -93,19 +93,29 @@ where `degradation_rate = ln(6.0) / TTF`, so a pipe starting at condition 6 reac
 ```
 h(t) = (β/η) × (t/η)^(β-1) × material_mult × exp(coeff_diameter × diameter)
        × (1 + α × min(n_breaks, LEYP_BREAK_FEEDBACK_CAP))
+       × wearout(age / base_life)
+
+wearout(r) = 1                                                  for r ≤ onset
+           = 1 + (M − 1) × (1 − exp(−k × (r − onset)))          for r > onset
 ```
 
 - **β, η**: Material-specific Weibull parameters.
 - **α**: LEYP feedback parameter (default 0.15).
+- **`wearout(r)`** — the **age-related arm of the bathtub curve**. `r` is the pipe's age as a multiple of its material's `STANDARD_LIFE.base_life`. The multiplier is exactly 1× through average life, then rises sharply and saturates at `WEAROUT_MAX_MULTIPLIER` (`M`, default 10): 2.6× at 110% of average life, 4.5× at 125%, 6.7× at 150%, 9.8× at 300%. `WEAROUT_ONSET_LIFE_RATIO` (default 1.0) sets where it begins and `WEAROUT_STEEPNESS` (`k`, default 2.0) how fast it rises. Bounded by construction, so it cannot diverge; it resets on renewal because a replaced pipe's age restarts at zero; `M = 1` disables it exactly. This term is what gives "end of life" a physical consequence: before it existed, a pipe at its condition floor broke no faster than a healthy pipe of the same age, and the model compensated with a rule that emergency-replaced any pipe the moment it reached the floor. The early-life arm (infant mortality) is deliberately not modelled; see `OPEN_ITEMS.md` DEC-6.
+- **Two clocks.** Wear-out runs on `STANDARD_LIFE.base_life`; condition decay runs on each pipe's sampled TTF around `DEGRADATION_PARAMS.ttf_mean`, which is ~25% shorter. Most pipes therefore reach the condition floor before wear-out begins. Condition is the planning signal; age is the mortality clock. The gap is reported as `Floor_Pipes_Below_Onset`.
 - **`LEYP_BREAK_FEEDBACK_CAP`**: Ceiling on the break count entering the feedback term. Hazard elevation from break history saturates in practice. **Without a ceiling the term is an unbounded positive feedback loop** — each break raises hazard, which produces more breaks — and it diverges in any run where pipes are not renewed. Renewal masks this: an untreated baseline reached ~10⁷ breaks/mile/year before the cap was added.
 
 Expected breaks per segment per year are `h(t) × segment_length / HAZARD_LENGTH_SCALE`. Each pipe has **4 virtual sub-segments**.
 
-**Failure rule:** a pipe is condemned when **any single segment** reaches `SEGMENT_BREAK_THRESHOLD` breaks (default 3). Break damage also reduces condition by `BREAK_CONDITION_PENALTY` per break, but is floored at `BREAK_DAMAGE_CONDITION_FLOOR` — that coupling exists to make a frequently-breaking pipe read as poor condition and become CIP-eligible, not to act as a third independent route to failure alongside age-out and the segment rule.
+**Failure rule:** a pipe is condemned when **any single segment** reaches `SEGMENT_BREAK_THRESHOLD` breaks (default 3). **This is the only route to emergency replacement.** Reaching the condition floor has no direct consequence: a worn-out pipe stays in service, remains CIP-eligible, and keeps breaking under the wear-out hazard until planned renewal reaches it or a segment fails. (Earlier versions emergency-replaced any pipe the moment it reached the floor, which charged $5,000/ft for simply existing and drove the optimizer to spend without limit.) Break damage also reduces condition by `BREAK_CONDITION_PENALTY` per break, floored at `BREAK_DAMAGE_CONDITION_FLOOR` — that coupling makes a frequently-breaking pipe read as poor condition and become CIP-eligible; it is not a route to failure.
 
 ### Calibration
 
-`HAZARD_LENGTH_SCALE` is a pure units constant with no physical claim of its own, which makes it the right knob for the model's absolute break production. It is calibrated so a **do-nothing run** (no CIP, no emergency renewal) of the reference network produces **0.287 breaks/mile/year**.
+`HAZARD_LENGTH_SCALE` is a pure units constant with no physical claim of its own, which makes it the right knob for the model's absolute break production. It is a **static parameter**; "calibration" refers to how its value was chosen, not to anything that happens at run time.
+
+It is derived against a **short untreated window**: the inventory as it stands, run with no CIP and no renewal for `CALIBRATION_WINDOW_YEARS` (10), matched to **0.287 breaks/mile/year**. A short window measures today's network, which is what a published break-rate statistic describes. The full 100-year do-nothing run is kept only as a **stability check** — it must stay finite and sit above the window rate — because under wear-out most of that run is spent with the whole network far past average life at the saturated multiplier, a state no real utility is in and no literature rate was measured on.
+
+The derived value is tightly coupled to `WEAROUT_MAX_MULTIPLIER`: the inherited backlog is already past onset, so the window rate scales almost proportionally with the ceiling (0.11 / 0.26 / 0.60 at 5× / 10× / 20× with the scale held fixed). Only the combination is pinned by the break-rate target; separating them needs local break records broken down by pipe age.
 
 Anchor: Folkman (2018) national averages weighted by that network's material mix give 0.077 breaks/mile/year across all ages; an untreated network already 60% past design life and ageing a further century should sit several times above that. **Re-derive this constant if the inventory, material parameters, or `ALPHA` change.**
 
@@ -142,13 +152,13 @@ Both are discounted at `DISCOUNT_RATE` (default 3% real). Undiscounted totals ar
 ### Annual Loop Order
 
 ```
-1. PLANNED CIP        decided on condition at the last assessment
-2. DEGRADE            apply natural ageing
-3. EMERGENCY REPLACE  pipes the plan did not reach in time
-4. BREAKS             Poisson events, repairs, break-driven failures
+1. PLANNED CIP   decided on condition at the last assessment
+2. DEGRADE       apply natural ageing; count pipes at the floor
+3. BREAKS        Poisson events under the wear-out hazard, repairs, and
+                 emergency replacement of any pipe whose segment failed
 ```
 
-CIP decides **before** the year's degradation is applied. Ordering degradation first would let the program intercept a pipe in the very year it crossed the failure floor — perfect foresight plus same-year execution, which no capital program can schedule, and which makes replacing at the last possible moment look optimal.
+CIP decides **before** the year's degradation and breaks. Deciding afterwards would let the program intercept a pipe in the very year it fails — perfect foresight plus same-year execution, which no capital program can schedule, and which makes replacing at the last possible moment look optimal. There is no separate emergency step for pipes at the condition floor; emergency replacement happens inside step 3, and only after a segment fails.
 
 ---
 
@@ -202,12 +212,12 @@ pytest                                        # 140 tests
 | `nsga2_results.csv` | Pareto front: objectives, genes, total cost, normalized position, distance to ideal |
 | `Optimal_Action_Plan.csv` | Year-by-year schedule for the selected strategy |
 | `cost_summary.csv` | Present values, undiscounted totals, and plan health metrics |
-| `simulation_diagnostics.csv` | Per-year CIP/emergency/break activity, budget utilization, discount factors |
+| `simulation_diagnostics.csv` | Per-year CIP/emergency/break activity, budget utilization, discount factors, `Pipes_At_Floor`, `Floor_Pipes_Below_Onset` |
 | `optimization_curve.png` | Investment vs. risk cost with the Pareto front |
 | `validation_curve.png` | Three-panel validation |
 | `validation_data.csv` | Validation curve data with replicate spread |
 
-`Optimal_Action_Plan.csv` records `Action` (`CIP_Replacement`, `Emergency_Replacement`, `Break_Event`), `Cause` for emergencies (`degradation`, `break_failure`, `break_damage`), `Backlog` marking the first replacement of an inherited-backlog pipe, `Priority` (the ranking value, captured before the pipe is reset), and `Annualized_Risk`.
+`Optimal_Action_Plan.csv` records `Action` (`CIP_Replacement`, `Emergency_Replacement`, `Break_Event`), `Cause` for emergencies (always `break_failure` — the segment rule is the only route), `Life_Ratio` (age ÷ average life at the time of an emergency), `Backlog` marking the first replacement of an inherited-backlog pipe, `Priority` (the ranking value, captured before the pipe is reset), and `Annualized_Risk`.
 
 `cost_summary.csv` reports `CIP_To_Emergency_Ratio`, `Mean_Budget_Utilization`, `Zero_Spend_Years`, `Breaks_Per_Mile_Year`, `Investment_Share_Of_Total`, `Yr1_2_Emergency_Count`, `Max_Annual_Emergency_Count`, and the inherited-backlog figures.
 
@@ -248,7 +258,13 @@ LEYP_BREAK_FEEDBACK_CAP = 10    # ceiling on feedback; without it the model dive
 COEFF_DIAMETER = -0.02
 N_SEGMENTS_PER_PIPE = 4
 SEGMENT_BREAK_THRESHOLD = 3     # breaks in ONE segment that condemn the pipe
-HAZARD_LENGTH_SCALE = 1500.0    # calibrated; see Calibration
+HAZARD_LENGTH_SCALE = 4300.0    # derived on a 10-yr untreated window; see Calibration
+CALIBRATION_WINDOW_YEARS = 10
+
+# Wear-out (bathtub curve, age-related arm) — see Hazard & Break Simulation
+WEAROUT_ONSET_LIFE_RATIO = 1.0  # begins at this multiple of STANDARD_LIFE.base_life
+WEAROUT_MAX_MULTIPLIER = 10.0   # hazard ceiling the arm saturates toward
+WEAROUT_STEEPNESS = 2.0         # per unit of life ratio beyond onset
 BREAK_CONDITION_PENALTY = 0.3
 BREAK_DAMAGE_CONDITION_FLOOR = 1.05
 SIMULATION_YEARS = 100
@@ -417,7 +433,7 @@ python3 -c "from checkpoint import inspect_checkpoint; inspect_checkpoint('nsga2
 
 **Changing costs:** edit the cost constants in `leyp_config.py`. Re-check the sensitivity notes above — the emergency premium determines whether proactive work is economic at all.
 
-**Changing physics:** re-derive `HAZARD_LENGTH_SCALE` against the untreated break rate; `test_untreated_break_rate_is_defensible` pins the target band.
+**Changing physics:** re-derive `HAZARD_LENGTH_SCALE` against the 10-year untreated window; `test_calibration_window_rate_is_defensible` pins the target band, `test_long_untreated_run_stays_finite` pins stability, and `test_hazard_scale_is_the_calibrated_value` pins the number so a silent edit fails the suite. Any change to a `WEAROUT_*` constant also requires re-derivation.
 
 ---
 

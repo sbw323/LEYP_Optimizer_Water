@@ -15,6 +15,9 @@ from leyp_config import (
     N_SEGMENTS_PER_PIPE,
     SEGMENT_BREAK_THRESHOLD,
     STANDARD_LIFE,
+    WEAROUT_MAX_MULTIPLIER,
+    WEAROUT_ONSET_LIFE_RATIO,
+    WEAROUT_STEEPNESS,
     map_condition_to_n_start,
 )
 
@@ -205,6 +208,31 @@ class Pipe:
         self.current_condition = max(1.0, min(6.0, self.current_condition))
         self.update_leyp_state()
 
+    def life_ratio(self, sim_year_idx):
+        """Age as a multiple of the material's average life (STANDARD_LIFE.base_life).
+
+        Age restarts at zero on renewal (initial_age is set to -year), so a
+        replaced pipe re-enters useful life.
+        """
+        age = max(self.initial_age + sim_year_idx, 0.0)
+        life = STANDARD_LIFE.get(self.material, STANDARD_LIFE["Default"])["base_life"]
+        return age / life
+
+    def wearout_multiplier(self, sim_year_idx):
+        """Age-related hazard multiplier: the wear-out arm of the bathtub curve.
+
+        Exactly 1.0 until life_ratio reaches WEAROUT_ONSET_LIFE_RATIO, then
+        1 + (MAX - 1) * (1 - exp(-STEEPNESS * excess)), saturating at
+        WEAROUT_MAX_MULTIPLIER.  Bounded by construction; a maximum of 1.0
+        disables the term exactly.
+        """
+        excess = max(0.0, self.life_ratio(sim_year_idx) - WEAROUT_ONSET_LIFE_RATIO)
+        if excess <= 0.0 or WEAROUT_MAX_MULTIPLIER <= 1.0:
+            return 1.0
+        return 1.0 + (WEAROUT_MAX_MULTIPLIER - 1.0) * (
+            1.0 - math.exp(-WEAROUT_STEEPNESS * excess)
+        )
+
     def calculate_hazard(self, sim_year_idx):
         current_age = self.initial_age + sim_year_idx
         t = max(current_age, 0.1)
@@ -214,7 +242,8 @@ class Pipe:
         # plateaus.  An unbounded term diverges once pipes stop being renewed.
         effective_breaks = min(self.n_breaks, LEYP_BREAK_FEEDBACK_CAP)
         leyp_factor = 1.0 + (ALPHA * effective_breaks)
-        return h0 * cov_factor * leyp_factor
+        # Wear-out: age beyond average life raises hazard toward a bounded ceiling.
+        return h0 * cov_factor * leyp_factor * self.wearout_multiplier(sim_year_idx)
 
     def simulate_year(self, sim_year_idx):
         """Simulate one year of pipe operation with break generation.

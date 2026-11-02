@@ -109,3 +109,50 @@ def test_emergency_carries_a_premium_over_planned_work():
     # Compared at the network's dominant 6-inch diameter.
     cip_per_ft = CIP_REPLACEMENT_COST_PER_INCH_FT * 6
     assert EMERGENCY_REPLACEMENT_COST_PER_FT > cip_per_ft * 2
+
+
+# --- The symptom: an interior budget optimum ------------------------------------
+
+# Wide enough that a genuine interior optimum has room on both sides, and run
+# at the configured replicate count: the cost surface is flat above the
+# optimum (plan 2.2), so at fewer replicates the argmin is decided by noise.
+_SWEEP = (10_000, 200_000, 500_000, 1_000_000, 1_500_000, 2_000_000, 3_000_000, 5_000_000)
+
+
+def _configured_replicates():
+    import yaml
+
+    return int(yaml.safe_load(open("optimizer_config.yaml"))["simulation"]["n_replicates"])
+
+
+def _min_cost_budget(n_replicates=None):
+    n_replicates = n_replicates or _configured_replicates()
+    from leyp_runner import simulate
+
+    totals = {}
+    for b in _SWEEP:
+        r = simulate("Louisa_wConduits_Input_CSV.csv", annual_budget=b, rehab_trigger=1.5,
+                     seed=20260830, n_replicates=n_replicates)
+        totals[b] = r["investment_cost"] + r["risk_cost"]
+    return min(totals, key=totals.get)
+
+
+def test_budget_optimum_is_interior():
+    """The optimizer no longer drives the budget to a bound."""
+    best = _min_cost_budget()
+    assert best not in (_SWEEP[0], _SWEEP[-1]), f"optimum at a bound: ${best:,}"
+
+
+def test_wearout_is_load_bearing_for_interior_optimum(monkeypatch):
+    """Without wear-out the optimum sits at a bound again.
+
+    Pins the finding that the age-related term is what gives the capital
+    programme a target worth funding: it concentrates risk in old pipes that
+    CIP can reach by risk-per-dollar. Remove it and risk is spread evenly, so
+    either buying everything always pays or nothing does.
+    """
+    import leyp_core
+
+    monkeypatch.setattr(leyp_core, "WEAROUT_MAX_MULTIPLIER", 1.0)
+    best = _min_cost_budget()
+    assert best in (_SWEEP[0], _SWEEP[-1]), f"unexpected interior optimum without wear-out: ${best:,}"

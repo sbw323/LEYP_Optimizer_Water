@@ -9,14 +9,14 @@ measurement behind it, so nothing here rests on assertion.
 | Branch | `claude/leyp-optimizer-water-review-t8cr56` |
 | Pull request | [#2](https://github.com/sbw323/LEYP_Optimizer_Water/pull/2) |
 | Tests | 140 passing |
-| Items | 16 |
+| Items | 19 |
 
 | Category | Count |
 |---|---:|
 | Latent defect | 1 |
-| Your decision | 5 |
+| Your decision | 7 |
 | Data quality | 4 |
-| Model behaviour | 3 |
+| Model behaviour | 4 |
 | Engineering | 3 |
 
 ---
@@ -156,6 +156,43 @@ unfundable pipes per year
 **Done when** either the adopted budget keeps unfundable near zero, or a
 reserve-accrual or phased-construction rule is added for large mains.
 
+### DEC-6 — Infant mortality is not modelled
+
+**Decision · small** — *Deferred by decision on 2026-11-02.*
+
+The bathtub curve has two arms. The age-related arm (wear-out) is implemented; the
+early-life arm — elevated failure in the first years after installation, decaying to the
+useful-life rate — is not. It would apply to every CIP renewal and so directly lowers the
+value of planned work, which is why it was held back rather than switched on by default.
+
+```
+would add:  INFANT_MORTALITY_MULTIPLIER (1.0 = off), INFANT_MORTALITY_YEARS
+would need: a decay form, a value, and re-derivation of HAZARD_LENGTH_SCALE
+```
+
+**Done when** either a multiplier and duration are chosen from new-main failure data and
+the term is enabled behind its own constant, or the omission is recorded as deliberate.
+
+### DEC-7 — Two "average lifespans" drive two different clocks
+
+**Decision · small** — *Accepted as-is on 2026-11-02; made visible rather than aligned.*
+
+`STANDARD_LIFE.base_life` drives initial condition and wear-out onset.
+`DEGRADATION_PARAMS.ttf_mean` drives the condition-decay clock. They differ by ~25%
+(DI 100 vs 75, AC 60 vs 45, CI 75 vs 60, PVC 120 vs 90), so most pipes reach the
+condition floor *before* wear-out begins and can sit there at a 1× multiplier. This is
+coherent — condition is the planning signal, age is the mortality clock — but it is a
+choice, and the gap is now reported.
+
+```
+simulation_diagnostics.csv  Floor_Pipes_Below_Onset   (per year)
+cost_summary.csv            Floor_Pipe_Years_Below_Onset
+measured at $500k, trigger 1.5: 16% of floor pipe-years are below onset
+```
+
+**Done when** the share stays acceptable in the plans you publish, or the tables are
+aligned (or onset re-based on `ttf_mean`) and the scale re-derived.
+
 ---
 
 ## Data quality
@@ -261,12 +298,15 @@ quoting a trigger alone.
 
 ### MOD-2 — The break-repair cost stream is immaterial to the objective
 
-**Check · small**
+**Check · small** — *Re-read after the end-of-life change (`EOL_MODELLING_PLAN.md`): breaks
+are now the only route to emergency replacement, so the break rate carries the whole risk
+objective, but each break still costs only $5,000 against $5,000/ft for the replacement it
+can trigger.*
 
 Risk cost is almost entirely emergency replacement; point repairs contribute under half
 a percent. Either the per-break cost understates what a repair really costs Louisa, or
 the stream genuinely does not matter — and it is worth knowing which, because the model
-currently optimises as though breaks themselves are nearly free.
+optimises as though breaks themselves are nearly free.
 
 ```
 at the selected plan:
@@ -296,6 +336,25 @@ parameters with demonstrated leverage:
 
 **Done when** a single command sweeps these and writes a tornado or one-at-a-time
 sensitivity table into the results directory.
+
+### MOD-4 — Calibration scale and wear-out ceiling are nearly degenerate
+
+**Caveat · medium**
+
+`HAZARD_LENGTH_SCALE` is derived by matching the 10-year untreated break rate to a target.
+Because the inherited backlog is already past wear-out onset, that rate scales almost
+proportionally with `WEAROUT_MAX_MULTIPLIER`, so the break-rate target pins only the
+*combination* of the two. A different ceiling with a correspondingly different scale
+reproduces the same window rate while distributing breaks differently between young and
+old pipes.
+
+```
+window rate with scale fixed at 4,300:   Mmax 5 -> 0.112   10 -> 0.262   20 -> 0.603
+```
+
+**Done when** local break records broken down by pipe age (see DAT-1) are used to fit the
+ceiling and the scale separately, or the degeneracy is recorded as an accepted
+limitation of the national-average anchor.
 
 ---
 

@@ -31,6 +31,29 @@ ALPHA = 0.15
 # breaks/mile/year.  At the default cap the feedback tops out at 2.5x.
 LEYP_BREAK_FEEDBACK_CAP = 10
 
+# --- Wear-out: the age-related arm of the bathtub curve ---
+# Hazard is multiplied by a factor that is exactly 1.0 until a pipe reaches
+# WEAROUT_ONSET_LIFE_RATIO times its material's STANDARD_LIFE.base_life, then
+# rises as  1 + (MAX - 1) * (1 - exp(-STEEPNESS * excess_life_ratio))  and
+# saturates at WEAROUT_MAX_MULTIPLIER.  With the defaults: 1.0x through average
+# life, 2.6x at 110% of it, 4.5x at 125%, 6.7x at 150%, 9.8x at 300%.
+#
+# This is what makes "end of life" mean something in the physics.  Before it
+# existed, a pipe at its condition floor broke no faster than a healthy pipe of
+# the same age, and the model compensated with a rule that emergency-replaced
+# any pipe the moment it reached the floor - which is what drove the optimizer
+# to spend without limit.  That rule is gone; wear-out replaces it.
+#
+# The multiplier is bounded, so it cannot diverge; it resets on renewal, since a
+# replaced pipe's age restarts at zero; and a value of 1.0 for the maximum
+# disables it exactly.  Onset runs on STANDARD_LIFE.base_life by decision, not
+# on DEGRADATION_PARAMS.ttf_mean (the condition clock) - the two differ by ~25%,
+# so a pipe can reach its condition floor before wear-out begins.  That gap is
+# reported per year as Floor_Pipes_Below_Onset.
+WEAROUT_ONSET_LIFE_RATIO = 1.0
+WEAROUT_MAX_MULTIPLIER = 10.0
+WEAROUT_STEEPNESS = 2.0
+
 # Condition penalty applied per break in a year (review finding C1).  Breaks
 # already influence the model twice — they raise future hazard through the
 # LEYP term and accumulate toward the segment failure rule — so this coupling
@@ -99,14 +122,27 @@ SEGMENT_BREAK_THRESHOLD = 3
 # units constant with no physical claim of its own, so it is the right knob to
 # calibrate the model's absolute break production against observed rates.
 #
-# Calibrated so a do-nothing run of this network (no CIP, no renewal, 100 yr)
-# produces 0.287 breaks/mile/year.  Anchor: Folkman (2018) national averages
-# weighted by this network's material mix give 0.077 breaks/mile/year across
-# all ages; an untreated network that is already 60% past design life and ages
-# a further century should sit several times above that.  Re-derive this value
-# if the inventory, the material parameters, or ALPHA change.
-HAZARD_LENGTH_SCALE = 1500.0
+# Derived against a 10-year untreated window (CALIBRATION_WINDOW_YEARS) of the
+# Louisa inventory as it stands - no CIP, no renewal - matched to 0.287
+# breaks/mile/year.  Measured at this value: 0.285 over the window; the
+# 100-year do-nothing run reaches 0.926, finite and above the window as an
+# ageing network should be.  Anchor: Folkman (2018) national averages weighted
+# by this network's material mix give 0.077 across all ages; a network already
+# 60% past design life should sit several times above that.
+#
+# Derived with WEAROUT_MAX_MULTIPLIER = 10.  Re-derive if the inventory, the
+# material parameters, ALPHA, or any wear-out constant changes.  (2026-11-02)
+HAZARD_LENGTH_SCALE = 4300.0
 SIMULATION_YEARS = 100
+
+# Horizon used when deriving HAZARD_LENGTH_SCALE.  The constant is static; this
+# is the scenario it was tuned against: the inventory as it stands, run with no
+# intervention for this many years, matched to the target break rate.  A short
+# window measures today's network - what a published breaks/mile/year statistic
+# describes.  The full 100-year do-nothing run is kept as a stability check only,
+# because under wear-out most of that run is spent with the whole network far
+# past average life at the saturated multiplier, a state no real utility is in.
+CALIBRATION_WINDOW_YEARS = 10
 
 # ==========================================
 # 6. COST PARAMETERS

@@ -197,12 +197,14 @@ def test_budget_utilization_never_exceeds_one(inventory_csv, tmp_path):
     assert (diag["CIP_Spend"] <= BUDGET + 1e-6).all()
 
 
-def test_every_emergency_action_carries_a_cause(inventory_csv, tmp_path):
+def test_every_emergency_action_carries_a_cause(tmp_path):
+    """Uses the real inventory: with no forced floor replacement a small
+    synthetic network at a generous budget produces no emergencies at all."""
     out = tmp_path / "results"
     run_simulation(
-        override_input_path=inventory_csv,
-        annual_budget=BUDGET,
-        rehab_trigger=TRIGGER,
+        override_input_path="Louisa_wConduits_Input_CSV.csv",
+        annual_budget=500_000.0,
+        rehab_trigger=1.5,
         output_dir=str(out),
         generate_report=True,
         seed=25,
@@ -229,46 +231,92 @@ def _aged_out_pipe(pipe_attrs):
     return p
 
 
-def test_cip_captures_age_out_before_emergency(pipe_attrs, tmp_path, monkeypatch):
-    """A funded age-out pipe must be renewed by CIP, not emergency-replaced.
+def test_no_emergency_replacement_without_a_segment_failure(tmp_path):
+    """Every emergency row must coincide with a break on that pipe that year.
 
-    Review finding B3: the annual loop used to emergency-replace pipes the
-    moment degradation crossed the floor, before CIP ever saw them.
+    Seeded history is capped below the threshold, so a segment can only reach
+    it through a new break in the year it fails. An emergency row with no
+    same-year Break_Event would mean something other than the segment rule
+    triggered it.
     """
-    import leyp_runner
-    from water_replacement import ReplacementManager
-
-    seen = {"cip": 0, "emergency": 0}
-    real_run_year = ReplacementManager.run_year
-
-    def counting_run_year(self, network, year):
-        report = real_run_year(self, network, year)
-        seen["cip"] += report["Count"]
-        return report
-
-    monkeypatch.setattr(ReplacementManager, "run_year", counting_run_year)
-
     out = tmp_path / "r"
     run_simulation(
-        override_input_path=str(_write_aging_inventory(tmp_path)),
-        annual_budget=1e9,          # never the binding constraint
-        rehab_trigger=3.0,
+        override_input_path="Louisa_wConduits_Input_CSV.csv",
+        annual_budget=500_000.0,
+        rehab_trigger=1.5,
         output_dir=str(out),
         generate_report=True,
         seed=41,
     )
     plan = pd.read_csv(out / "Optimal_Action_Plan.csv")
-    emergencies = plan[plan["Action"] == "Emergency_Replacement"]
-    # "Cause" only exists once an emergency has been logged at all.
-    aged_out = (
-        emergencies[emergencies["Cause"] == "degradation"]
-        if "Cause" in plan.columns
-        else emergencies.iloc[0:0]
+    em = plan[plan["Action"] == "Emergency_Replacement"]
+    br = plan[plan["Action"] == "Break_Event"][["PipeID", "Year"]]
+    assert not em.empty
+    assert (em["Cause"] == "break_failure").all()
+    merged = em.merge(br, on=["PipeID", "Year"], how="left", indicator=True)
+    assert (merged["_merge"] == "both").all(), "emergency row without a same-year break"
+
+
+def test_floor_pipe_is_not_replaced_without_a_break(tmp_path, monkeypatch):
+    """A worn-out pipe that has not broken stays in service (plan 3A).
+
+    Hazard is silenced so no break can occur; the pipe decays to the floor
+    and must sit there, unreplaced, for the whole horizon.
+    """
+    import leyp_core
+
+    monkeypatch.setattr(leyp_core, "HAZARD_LENGTH_SCALE", 1e12)
+    df = pd.DataFrame(
+        [{"PipeID": "F", "Material": "GI", "Age": 96, "Length": 100.0,
+          "Diameter": 6, "Condition": 1, "CoF_Value": 1}]
     )
-    assert seen["cip"] > 0
-    assert aged_out.empty, (
-        "with unlimited budget no pipe should age out into the emergency stream"
+    path = tmp_path / "floor.csv"
+    df.to_csv(path, index=False)
+
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=str(path),
+        annual_budget=0.0,
+        rehab_trigger=1.5,
+        output_dir=str(out),
+        generate_report=True,
+        seed=71,
     )
+    plan = pd.read_csv(out / "Optimal_Action_Plan.csv") if (out / "Optimal_Action_Plan.csv").exists() else pd.DataFrame(columns=["Action"])
+    diag = pd.read_csv(out / "simulation_diagnostics.csv")
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    assert not (plan["Action"] == "Emergency_Replacement").any()
+    assert diag["Pipes_At_Floor"].iloc[-1] == 1
+    assert summary["Floor_Pipe_Years"] > 0
+    assert summary["Emergency_Count"] == 0
+
+
+def test_floor_dwell_is_reported(inventory_csv, tmp_path):
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path=inventory_csv, annual_budget=BUDGET, rehab_trigger=TRIGGER,
+        output_dir=str(out), generate_report=True, seed=72,
+    )
+    diag = pd.read_csv(out / "simulation_diagnostics.csv")
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    for c in ("Pipes_At_Floor", "Floor_Pipes_Below_Onset"):
+        assert c in diag.columns
+    assert diag["Pipes_At_Floor"].sum() == summary["Floor_Pipe_Years"]
+    assert diag["Pipes_At_Floor"].max() == summary["Max_Pipes_At_Floor"]
+    assert diag["Floor_Pipes_Below_Onset"].sum() == summary["Floor_Pipe_Years_Below_Onset"]
+    assert (diag["Floor_Pipes_Below_Onset"] <= diag["Pipes_At_Floor"]).all()
+
+
+def test_emergencies_fall_on_old_pipes(tmp_path):
+    """The pipes that fail should, on average, be past their average life."""
+    out = tmp_path / "r"
+    run_simulation(
+        override_input_path="Louisa_wConduits_Input_CSV.csv",
+        annual_budget=500_000.0, rehab_trigger=1.5,
+        output_dir=str(out), generate_report=True, seed=73, n_replicates=2,
+    )
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    assert summary["Mean_Life_Ratio_At_Emergency"] > 1.0
 
 
 def _write_aging_inventory(tmp_path):
