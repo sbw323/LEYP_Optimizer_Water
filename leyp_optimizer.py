@@ -308,33 +308,68 @@ def run_optimization():
 
 
 def plot_cost_curves(df, output_dir):
-    """
-    Generate cost curve visualization (Investment vs Risk costs).
-    
-    Args:
-        df: Results DataFrame with Investment_Cost, Risk_Cost columns
-        output_dir: Directory for output files
-    """
-    # Create pareto front plot
-    plt.figure(figsize=(10, 8))
-    scatter = plt.scatter(
-        df["Investment_Cost"],
-        df["Risk_Cost"],
-        c=df["Total_Cost"],
-        cmap="viridis",
-        alpha=0.7
-    )
-    plt.colorbar(scatter, label="Total Cost ($)")
+    """Plot the Pareto front with both strategy picks and the ideal point marked.
 
-    # Format and save cost curve plot
-    plt.xlabel("Investment Cost ($)")
-    plt.ylabel("Risk Cost ($)")
-    plt.title("Pareto Frontier: Investment vs Risk Cost")
-    plt.grid(True, alpha=0.3)
+    The front is drawn in order of investment so it reads as a trade-off curve.
+    The ``min_total_cost`` pick (lowest investment + risk) and the ``knee`` pick
+    (closest to the ideal point once both axes are normalised) are both marked,
+    with a dashed line from the ideal point to the knee so "closest to ideal" is
+    visible rather than asserted. Axes are in $M, present value.
+
+    Args:
+        df: Results DataFrame with Investment_Cost, Risk_Cost, Budget,
+            Rehab_Trigger and Total_Cost (annotated with Ideal_Distance if not
+            already).
+        output_dir: Directory for output files.
+    """
+    if "Ideal_Distance" not in df.columns:
+        df = annotate_front(df)
+    front = df.sort_values("Investment_Cost")
+    inv_m, risk_m = front["Investment_Cost"] / 1e6, front["Risk_Cost"] / 1e6
+
+    fig, ax = plt.subplots(figsize=(11, 8))
+    ax.plot(inv_m, risk_m, "-", color="0.55", linewidth=1, alpha=0.8, zorder=1)
+    scatter = ax.scatter(
+        inv_m, risk_m, c=front["Total_Cost"] / 1e6, cmap="viridis",
+        s=42, alpha=0.9, zorder=2, edgecolors="white", linewidths=0.5,
+    )
+    fig.colorbar(scatter, ax=ax, label="Total cost, PV ($M)")
+
+    # Ideal point and the two picks.
+    ideal = (df["Investment_Cost"].min() / 1e6, df["Risk_Cost"].min() / 1e6)
+    ax.plot(*ideal, "x", color="0.3", markersize=9, markeredgewidth=1.5, zorder=3)
+    ax.annotate("ideal point", ideal, xytext=(8, -14), textcoords="offset points",
+                fontsize=8, color="0.3")
+
+    picks = (
+        ("min_total_cost", "*", "tab:red", 240, (12, 12)),
+        ("knee", "D", "tab:blue", 90, (-46, 10)),
+    )
+    for method, marker, colour, size, offset in picks:
+        row = df.loc[select_strategy(df, method)]
+        x, y = row["Investment_Cost"] / 1e6, row["Risk_Cost"] / 1e6
+        ax.scatter([x], [y], marker=marker, s=size, color=colour,
+                   edgecolors="black", linewidths=0.8, zorder=4,
+                   # Dollar signs are escaped: matplotlib otherwise reads them
+                   # as mathtext delimiters and italicises the text between.
+                   label=(f"{method}: budget \\${row['Budget']/1e6:.2f}M/yr, "
+                          f"trigger {row['Rehab_Trigger']:.2f}, "
+                          f"total \\${row['Total_Cost']/1e6:.1f}M"))
+        ax.annotate(method, (x, y), xytext=offset, textcoords="offset points",
+                    fontsize=9, color=colour, fontweight="bold")
+        if method == "knee":
+            ax.plot([ideal[0], x], [ideal[1], y], "--", color="tab:blue",
+                    linewidth=1, alpha=0.6, zorder=3)
+
+    ax.set_xlabel("Investment cost, PV ($M)")
+    ax.set_ylabel("Risk cost, PV ($M)")
+    ax.set_title("Pareto front: investment vs risk, with strategy picks")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.95)
 
     cost_curve_path = os.path.join(output_dir, "optimization_curve.png")
-    plt.savefig(cost_curve_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.savefig(cost_curve_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
     print(f"Cost curve saved to {cost_curve_path}")
 
 
