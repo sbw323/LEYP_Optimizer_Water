@@ -9,7 +9,7 @@ measurement behind it, so nothing here rests on assertion.
 | Branch | `claude/leyp-optimizer-water-review-t8cr56` |
 | Pull request | [#2](https://github.com/sbw323/LEYP_Optimizer_Water/pull/2) |
 | Tests | 140 passing |
-| Items | 19 |
+| Items | 20 |
 
 | Category | Count |
 |---|---:|
@@ -17,7 +17,7 @@ measurement behind it, so nothing here rests on assertion.
 | Your decision | 7 |
 | Data quality | 4 |
 | Model behaviour | 4 |
-| Engineering | 3 |
+| Engineering | 4 |
 
 ---
 
@@ -393,6 +393,26 @@ constrain how often you iterate.
 
 **Done when** either a `Generator` instance is threaded through the physics, or
 evaluations are parallelised across processes.
+
+### ENG-4 — Make the `HAZARD_LENGTH_SCALE` derivation a maintained tool
+
+**Tooling · small** — *Deferred by decision on 2026-11-02.*
+
+The constant is static, but the method that chose it is not written down as code: it was
+derived by an ad-hoc script (fixed-point iteration on the 10-year untreated window to the
+target rate), and the result pasted into `leyp_config.py` with a comment. Anyone who
+changes the inventory, a material parameter, `ALPHA`, or a `WEAROUT_*` constant must
+re-derive it by hand from the description in the README.
+
+```
+proposed:  tools/derive_hazard_scale.py --target 0.287 --window 10 --replicates 8
+           prints the derived value, the window rate, the 100-yr stability rate,
+           and the WEAROUT_MAX_MULTIPLIER it assumes; optionally rewrites the
+           constant and its pinned test
+```
+
+**Done when** the script exists, is referenced from the README calibration section, and
+reproduces the current 4,300 at the current parameters.
 
 ### ENG-3 — Four unused symbols remain from earlier designs
 

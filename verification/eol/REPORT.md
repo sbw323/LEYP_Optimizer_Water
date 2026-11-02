@@ -8,7 +8,7 @@ with the approved decisions:
 | 1 — wear-out parameters | `WEAROUT_MAX_MULTIPLIER = 10`, `WEAROUT_STEEPNESS = 2`, `WEAROUT_ONSET_LIFE_RATIO = 1.0` (proposed defaults) |
 | 2 — which lifespan drives onset | `STANDARD_LIFE.base_life`; tables **not** aligned; the two-clock gap is reported, not removed |
 | 3 — infant mortality | Not modelled; recorded as `OPEN_ITEMS.md` DEC-6 |
-| 4 — calibration window | 10-year untreated window (proposed default, pending your confirmation — see note at end) |
+| 4 — calibration window | 10-year untreated window — **confirmed 2026-11-02**. Derivation tooling deferred to `OPEN_ITEMS.md` ENG-4 |
 | 5 — budget ceiling | Restored to $2,000,000 |
 
 All measurements: Louisa inventory, `seed = 20260830`. Run on 2026-11-02.
@@ -176,7 +176,4 @@ Not enabled (Decision 3).
 | V7 | PASS | Claude (session) | 2026-11-02 |
 | V8 | n/a | — | — |
 
-**Open for your confirmation:** Decision 4 (calibration window) was implemented at the
-proposed 10-year default so the suite could be green and the model coherent; it is a
-single constant (`CALIBRATION_WINDOW_YEARS`) plus a re-derivation of `HAZARD_LENGTH_SCALE`
-if you choose differently.
+All five decisions are recorded with their chosen values above.
