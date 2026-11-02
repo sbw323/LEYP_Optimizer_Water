@@ -107,14 +107,14 @@ worn-out but the age clock does not yet. Accepted as-is and recorded as DEC-7.
 
 ---
 
-## V5 — The symptom is resolved — PASS (V5.4 pending the full run)
+## V5 — The symptom is resolved — V5.1–V5.3, V5.5 PASS · **V5.4 FAIL on its literal criterion** (see analysis)
 
 | Check | Result |
 |---|---|
 | V5.1 Ceiling | `genes.budget.max = 2000000` ✓; `n_replicates = 8`. |
 | V5.2 Coarse sweep (5 reps) | $10k 77.7 · $200k 73.3 · $500k 52.4 · $1M 53.5 · **$1.5M 50.2** · $2M 50.3 — minimum strictly interior. `test_budget_optimum_is_interior` green at 8 reps on a sweep extended to $5M. |
 | V5.3 Control | `test_wearout_is_load_bearing_for_interior_optimum` green: with `M = 1.0` the minimum returns to a bound. |
-| V5.4 Full optimizer | _pending — see below_ |
+| V5.4 Full optimizer | Selected budget $1,820,560 = **91%** of ceiling → fails the < 90% criterion. No ceiling warning; 4 of 32 front solutions above 90%. See analysis below. |
 | V5.5 vs V0 | V0 min-cost budget **$5,000,000** (top of range) → V5 **$1,500,000** (interior). |
 
 **Honesty note on V5.2.** $1.5M (50.2) and $2M (50.3) differ by $0.1M against a replicate
@@ -122,23 +122,68 @@ sd of ~$2M. The surface is flat above ~$500k; the gate passes because the *lower
 decisively rejected (77.7 vs 50.2) and the argmin is no longer forced to the ceiling — not
 because a single sharp optimum exists. Read the Pareto front, not the point.
 
-### V5.4 — full optimizer run
+### V5.4 — full optimizer run — FAIL on criterion, with analysis
 
-_To be filled from `verification/eol/v5_optimizer.log` and `Optimization_Results_NSGA2/`._
+512 evaluations, 8 replicates each, $2M ceiling.
 
-- Selected budget: __ (__% of ceiling; pass < 90%)
-- Trigger: __
-- `[warning] ... upper gene bound` present: __
-- Front solutions above 90% of ceiling: __ of 32
+| Item | Result | Criterion |
+|---|---|---|
+| Selected budget (`min_total_cost`) | **$1,820,560 = 91% of ceiling**, trigger 1.27, PV total $44.6M | < 90% — **not met** |
+| `[warning] … upper gene bound` in log | absent | absent ✓ |
+| Front solutions above 90% of ceiling | 4 of 32 | < 8 ✓ |
+| Budget range on front | $10,263 – $1,974,173; trigger 1.17 – 2.56 | — |
+| `knee` would pick | $591,095, trigger 1.50, PV total $49.3M | — |
+
+**Why it failed, measured rather than argued.** Two follow-up sweeps at 16 replicates × 3
+independent seeds (`v5.4_plateau.txt`, `v5.4_above_ceiling.txt`):
+
+1. *Is the near-ceiling pick genuinely cheaper than the knee pick?* Yes: paired gap
+   −$3.2M, sd of gap $1.5M (~2σ). The optimizer is not being fooled by noise.
+2. *Does the surface keep falling past the ceiling?* No. Minimum of means is at **$2.5M**
+   at both triggers, then flat-to-rising to $5M:
+
+| Budget | Trigger 1.27 | Trigger 1.50 |
+|---:|---:|---:|
+| $1.5M | 51.0 | 51.0 |
+| $2.0M | 50.4 | 51.2 |
+| $2.5M | **50.2** | **50.4** |
+| $3.0M | 50.7 | 51.6 |
+| $4.0M | 51.5 | 51.2 |
+| $5.0M | 51.2 | 51.2 |
+
+Every difference in that table is inside the replicate noise (sd $1–3M). The surface is a
+very flat bowl whose bottom spans roughly **$1.5M–$5M**, centred near $2–2.5M. The $2M
+ceiling happens to sit on the bottom of it.
+
+**Reading.** The symptom was a *runaway*: forced $5,000/ft at the condition floor made
+cost fall steeply to any ceiling (baseline: 213 → 48 across $0–$5M; cap raised to $20M →
+$12.1M selected). That mechanism is gone — V5.3 proves the wear-out term is what removed
+it, and the gradient at the ceiling is now break-even within noise. What remains is a
+coincidence: the gate assumed the optimum would land well below the ceiling, and it lands
+roughly *at* it. Raising the ceiling would move the pick to about $2.5M and stop, not
+chase.
+
+**Not done to make it pass:** the criterion was not relaxed, the ceiling was not raised in
+the committed config, and the selection rule was not switched to `knee` (which would pass
+trivially at $591k but is $3.2M dearer and is a decision about which plan to publish, not a
+verification matter).
+
+**Options for closing V5.4** (Decision 5 revisited):
+- *Accept as-is* with this evidence: the model says this network's optimal programme is
+  ~$2M/yr and the ceiling is a realistic funding cap that coincides with it.
+- *Raise `genes.budget.max` to $3M* and re-run: expected selection ~$2.0–2.5M, interior,
+  which would satisfy the criterion as written at near-identical cost.
+- *Switch `selection` to `knee`*: publishes the $591k plan; cheaper to fund, $3.2M dearer
+  in PV, interior by construction.
 
 ---
 
-## V6 — Plan health and reproducibility — PASS (V6.1/V6.2 pending the full run)
+## V6 — Plan health and reproducibility — PASS
 
 | Check | Result |
 |---|---|
-| V6.1 Health metrics on the regenerated plan | _pending_ |
-| V6.2 Cost-effectiveness break-even exists | _pending_ |
+| V6.1 Health metrics on the regenerated plan | All five PASS: CIP **488** vs emergency **7**; investment share **0.70**; yr 1–2 emergencies **1**; max in any year **3**; mean life ratio at emergency **1.42**. Floor pipe-years 182 (max 4 at once; 56 below onset). Breaks 46 (0.021/mile-year). PV total $44.8M (inv $31.2M, risk $13.6M); nominal $125.0M; budget utilisation 0.49. |
+| V6.2 Cost-effectiveness break-even exists | PASS: proactive spend clears break-even up to **80.8%** of network length; max ratio 30.15. Curve reach unchanged (99.2% pipes, 90.2% length); diagonal panels still below the line, as expected and documented. |
 | V6.3 Reproducibility | Green (`same_seed`, `replicates`, `detailed_return` tests). |
 | V6.4 Noise vs flat surface (8 reps) | replicate sd **$2.17M** vs sweep range **$27.5M** → **8%** (pass < 25%). |
 | V6.5 Full suite | **173 passed, exit 0** (V0: 140). Net +33: 8 wear-out, 4 floor-semantics, 2 symptom, 2 calibration, rewrites of 4 pinned tests. |
@@ -171,9 +216,20 @@ Not enabled (Decision 3).
 | V2 | PASS | Claude (session) | 2026-11-02 |
 | V3 | PASS — flag on V3.4 | Claude (session) | 2026-11-02 |
 | V4 | PASS | Claude (session) | 2026-11-02 |
-| V5 | V5.1–V5.3, V5.5 PASS; V5.4 _pending_ | Claude (session) | 2026-11-02 |
-| V6 | V6.3–V6.5 PASS; V6.1–V6.2 _pending_ | Claude (session) | 2026-11-02 |
+| V5 | V5.1–V5.3, V5.5 PASS; **V5.4 FAIL on criterion** — optimum coincides with the ceiling; see analysis and options | Claude (session) | 2026-11-02 |
+| V6 | PASS | Claude (session) | 2026-11-02 |
 | V7 | PASS | Claude (session) | 2026-11-02 |
 | V8 | n/a | — | — |
 
 All five decisions are recorded with their chosen values above.
+
+**Overall.** Every gate passes except the literal threshold in V5.4. The behaviour the
+plan set out to remove — emergency replacement forced at the condition floor — is gone at
+both sites and cannot recur without a segment failure (V1). Wear-out gives end of life a
+physical consequence and is proven load-bearing for the interior optimum (V2, V5.3). The
+runaway to the budget ceiling is resolved as a mechanism; what V5.4 catches is that this
+network's optimal programme sits at roughly the ceiling that was restored. Closing V5.4 is
+a Decision-5 choice, set out in the three options above, not further engineering.
+
+Evidence files: `v5_optimizer.log`, `gates_v5.4-v6.2.txt`, `v5.4_plateau.txt`,
+`v5.4_above_ceiling.txt`, and the regenerated `Optimization_Results_NSGA2/`.
