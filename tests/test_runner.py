@@ -423,3 +423,38 @@ def test_absolute_emergency_counts_are_reported(inventory_csv, tmp_path):
     summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
     assert summary["Yr1_2_Emergency_Count"] == diag.head(2)["Emergency_Count"].sum()
     assert summary["Max_Annual_Emergency_Count"] == diag["Emergency_Count"].max()
+
+
+# --- CLI reporting ---------------------------------------------------------------
+
+def test_cli_undiscounted_block_is_consistent_with_replicates(inventory_csv, tmp_path):
+    """The CLI's undiscounted streams must be non-negative and sum to its total.
+
+    Regression: with --replicates > 1 the CLI subtracted a replicate-mean
+    emergency cost from a single replicate's risk total, printing a negative
+    repair cost.
+    """
+    import re
+    import subprocess
+    import sys
+
+    out = tmp_path / "cli"
+    proc = subprocess.run(
+        [sys.executable, "leyp_runner.py", "--input", inventory_csv,
+         "--budget", "250000", "--trigger", "2.5", "--seed", "9",
+         "--replicates", "4", "--output-dir", str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    block = proc.stdout.split("Undiscounted cash", 1)[1]
+
+    def amount(label):
+        m = re.search(rf"{label}:\s+\$\s*(-?[\d,]+)", block)
+        assert m, f"missing {label!r} in CLI output"
+        return float(m.group(1).replace(",", ""))
+
+    parts = [amount(k) for k in ("Investment \\(CIP\\)", "Emergency repairs", "Emergency replacements")]
+    assert all(v >= 0 for v in parts), parts
+    assert sum(parts) == pytest.approx(amount("Total"), abs=1.0)
+
+    summary = pd.read_csv(out / "cost_summary.csv").iloc[0]
+    assert amount("Emergency repairs") == pytest.approx(summary["Repair_Cost"], abs=1.0)

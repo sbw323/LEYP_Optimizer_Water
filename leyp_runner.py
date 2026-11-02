@@ -593,7 +593,7 @@ def _generate_reports(
         action_df = pd.DataFrame(all_actions)
         # Sort chronologically (CIP actions from ReplacementManager are
         # appended after the simulation loop and land out of order)
-        action_df.sort_values("Year", inplace=True, ignore_index=True)
+        action_df = action_df.sort_values("Year", ignore_index=True)
         # Fill missing Breaks column for non-break rows
         if "Breaks" in action_df.columns:
             action_df["Breaks"] = action_df["Breaks"].fillna(0).astype(int)
@@ -768,24 +768,32 @@ if __name__ == "__main__":
 
         if generate:
             inv, risk, cip, emerg, breaks = result
-            # The tuple carries present values; re-read the undiscounted cash
-            # from the summary the run just wrote.
+            # The tuple carries present values averaged over replicates. The
+            # undiscounted block is read entirely from the summary the run just
+            # wrote, which describes the single replicate in the action plan.
+            # Mixing the two (a replicate mean minus a single replicate's total)
+            # printed a negative repair cost whenever replicates > 1.
             _summary = pd.read_csv(
                 os.path.join(args.output_dir, "cost_summary.csv")
             ).iloc[0]
-            nominal_inv = _summary["Nominal_Investment"]
-            nominal_risk = _summary["Nominal_Risk"]
+            nominal_cip = _summary["CIP_Cost"]
+            nominal_repair = _summary["Repair_Cost"]
+            nominal_emerg = _summary["Emergency_Cost"]
             total = inv + risk
             print(f"\n--- Results (100-year horizon, present value @ {DISCOUNT_RATE:.0%} real) ---")
             print(f"  Investment (CIP)  PV:        ${inv:>14,.0f}")
             print(f"  Risk (repairs+emergency) PV: ${risk:>14,.0f}")
             print(f"  Total Cost        PV:        ${total:>14,.0f}")
             print(f"  Total Breaks:                 {breaks:>14,.1f}")
-            print("\n  Undiscounted cash over the horizon:")
-            print(f"    Investment (CIP):          ${nominal_inv:>14,.0f}")
-            print(f"    Emergency repairs:         ${(nominal_risk - emerg):>14,.0f}")
-            print(f"    Emergency replacements:    ${emerg:>14,.0f}")
-            print(f"    Total:                     ${nominal_inv + nominal_risk:>14,.0f}")
+            label = (
+                "the replicate written to the action plan"
+                if args.replicates > 1 else "this run"
+            )
+            print(f"\n  Undiscounted cash over the horizon ({label}):")
+            print(f"    Investment (CIP):          ${nominal_cip:>14,.0f}")
+            print(f"    Emergency repairs:         ${nominal_repair:>14,.0f}")
+            print(f"    Emergency replacements:    ${nominal_emerg:>14,.0f}")
+            print(f"    Total:                     ${nominal_cip + nominal_repair + nominal_emerg:>14,.0f}")
             if args.output_dir:
                 print(f"\n  Reports written to: {args.output_dir}/")
 
