@@ -59,7 +59,10 @@ defensible placeholder rather than chosen on your behalf.
 
 ### DEC-1 — The optimum is pinned against the budget ceiling
 
-**Decision · small**
+**Decision · small** — **Superseded by `EOL_MODELLING_PLAN.md`.** The root cause is a
+forced emergency replacement whenever a pipe reaches its condition floor, not the ceiling
+itself; raising the ceiling to $20M moved the optimum to $12.1M/yr rather than freeing it.
+Retained below for the record.
 
 The selected strategy sits within 0.1% of the $2M gene ceiling, so the search never
 found an interior optimum in budget — the true best may lie above it. The run emits a
