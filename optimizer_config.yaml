@@ -53,7 +53,7 @@ validation:
 #   knee           - closest to the ideal point once both objectives are
 #                    normalised; the best-balanced trade-off
 # The run prints what the other rule would have chosen either way.
-selection: min_total_cost
+selection: knee
 
 # 8. ALGORITHM SETTINGS
 # Sized for a noisy two-gene objective: ~510 evaluations against the previous
