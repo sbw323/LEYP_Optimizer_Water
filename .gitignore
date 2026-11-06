@@ -4,3 +4,7 @@ __pycache__/
 # Optimizer runtime artifacts
 nsga2_checkpoint.pkl
 temp_optimization_input.csv
+
+# Verification evidence (keep only the report)
+verification/eol/*
+!verification/eol/REPORT.md

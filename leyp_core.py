@@ -4,14 +4,20 @@ import numpy as np
 
 from leyp_config import (
     ALPHA,
+    BREAK_CONDITION_PENALTY,
+    BREAK_DAMAGE_CONDITION_FLOOR,
     COEFF_DIAMETER,
     DEGRADATION_PARAMS,
     EMERGENCY_REPAIR_COST_PER_BREAK,
     HAZARD_LENGTH_SCALE,
+    LEYP_BREAK_FEEDBACK_CAP,
     MATERIAL_PROPS,
     N_SEGMENTS_PER_PIPE,
     SEGMENT_BREAK_THRESHOLD,
     STANDARD_LIFE,
+    WEAROUT_MAX_MULTIPLIER,
+    WEAROUT_ONSET_LIFE_RATIO,
+    WEAROUT_STEEPNESS,
     map_condition_to_n_start,
 )
 
@@ -107,19 +113,36 @@ class Pipe:
         self.has_failed_in_sim = False
 
     def _seed_breaks(self, life_fraction):
-        """Seed historical breaks based on age uniformly across segments.
+        """Seed historical breaks based on age, uniformly across segments.
+
+        Seeded breaks represent repairs the utility has already made.  Their
+        purpose is the LEYP feedback term (1 + alpha * n_breaks): a pipe that
+        has broken before is more likely to break again.  They must not, on
+        their own, condemn a pipe — the inventory lists these pipes as in
+        service, so a pipe that starts the simulation already past the failure
+        rule contradicts its own input data (review finding A1).
+
+        Each segment is therefore capped one break below
+        SEGMENT_BREAK_THRESHOLD.  The failure rule itself is unchanged: any
+        single segment reaching the threshold still condemns the pipe, and
+        seeded breaks still count toward it — a segment seeded at the cap
+        fails on its next break.
 
         Args:
             life_fraction (float): Fraction of standard life already lived (0-1)
         """
         max_expected = int(life_fraction * 6)
-        if max_expected > 0:
-            n_seeded = np.random.randint(0, max_expected + 1)
+        if max_expected <= 0:
+            return
 
-            # Distribute breaks uniformly across segments
-            for _ in range(n_seeded):
-                segment_idx = np.random.randint(0, len(self.segments))
-                self.segments[segment_idx].n_point_breaks += 1
+        n_seeded = np.random.randint(0, max_expected + 1)
+        seed_cap = SEGMENT_BREAK_THRESHOLD - 1
+
+        for _ in range(n_seeded):
+            available = [s for s in self.segments if s.n_point_breaks < seed_cap]
+            if not available:
+                break  # Every segment is at the cap; discard the remainder.
+            available[np.random.randint(0, len(available))].n_point_breaks += 1
 
     def reset_physics_params(self):
         mat_params = MATERIAL_PROPS.get(self.material, MATERIAL_PROPS["Default"])
@@ -185,13 +208,42 @@ class Pipe:
         self.current_condition = max(1.0, min(6.0, self.current_condition))
         self.update_leyp_state()
 
+    def life_ratio(self, sim_year_idx):
+        """Age as a multiple of the material's average life (STANDARD_LIFE.base_life).
+
+        Age restarts at zero on renewal (initial_age is set to -year), so a
+        replaced pipe re-enters useful life.
+        """
+        age = max(self.initial_age + sim_year_idx, 0.0)
+        life = STANDARD_LIFE.get(self.material, STANDARD_LIFE["Default"])["base_life"]
+        return age / life
+
+    def wearout_multiplier(self, sim_year_idx):
+        """Age-related hazard multiplier: the wear-out arm of the bathtub curve.
+
+        Exactly 1.0 until life_ratio reaches WEAROUT_ONSET_LIFE_RATIO, then
+        1 + (MAX - 1) * (1 - exp(-STEEPNESS * excess)), saturating at
+        WEAROUT_MAX_MULTIPLIER.  Bounded by construction; a maximum of 1.0
+        disables the term exactly.
+        """
+        excess = max(0.0, self.life_ratio(sim_year_idx) - WEAROUT_ONSET_LIFE_RATIO)
+        if excess <= 0.0 or WEAROUT_MAX_MULTIPLIER <= 1.0:
+            return 1.0
+        return 1.0 + (WEAROUT_MAX_MULTIPLIER - 1.0) * (
+            1.0 - math.exp(-WEAROUT_STEEPNESS * excess)
+        )
+
     def calculate_hazard(self, sim_year_idx):
         current_age = self.initial_age + sim_year_idx
         t = max(current_age, 0.1)
         h0 = (self.beta / self.eta) * ((t / self.eta) ** (self.beta - 1))
         cov_factor = self.mat_mult * np.exp(COEFF_DIAMETER * self.diameter)
-        leyp_factor = 1.0 + (ALPHA * self.n_breaks)
-        return h0 * cov_factor * leyp_factor
+        # Saturating feedback: break history raises hazard but the effect
+        # plateaus.  An unbounded term diverges once pipes stop being renewed.
+        effective_breaks = min(self.n_breaks, LEYP_BREAK_FEEDBACK_CAP)
+        leyp_factor = 1.0 + (ALPHA * effective_breaks)
+        # Wear-out: age beyond average life raises hazard toward a bounded ceiling.
+        return h0 * cov_factor * leyp_factor * self.wearout_multiplier(sim_year_idx)
 
     def simulate_year(self, sim_year_idx):
         """Simulate one year of pipe operation with break generation.
@@ -211,10 +263,15 @@ class Pipe:
             n = seg.simulate_breaks(intensity)
             total_new_breaks += n
 
-        # Apply damage from new breaks
+        # Apply damage from new breaks.  Floored above the failure threshold:
+        # this coupling exists to make a frequently-breaking pipe read as poor
+        # condition (and so become CIP-eligible), not to act as a third,
+        # independent route to failure alongside age-out and the segment rule.
         if total_new_breaks > 0:
-            damage = 0.3 * total_new_breaks
-            self.current_condition = max(1.0, self.current_condition - damage)
+            damage = BREAK_CONDITION_PENALTY * total_new_breaks
+            self.current_condition = max(
+                BREAK_DAMAGE_CONDITION_FLOOR, self.current_condition - damage
+            )
             self.update_leyp_state()
 
         # Check for segment failure (regardless of whether new breaks occurred)
