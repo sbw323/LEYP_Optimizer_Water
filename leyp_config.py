@@ -132,7 +132,7 @@ SEGMENT_BREAK_THRESHOLD = 3
 #
 # Derived with WEAROUT_MAX_MULTIPLIER = 10.  Re-derive if the inventory, the
 # material parameters, ALPHA, or any wear-out constant changes.  (2026-11-02)
-HAZARD_LENGTH_SCALE = 4300.0
+HAZARD_LENGTH_SCALE = 8600.0
 SIMULATION_YEARS = 100
 
 # Horizon used when deriving HAZARD_LENGTH_SCALE.  The constant is static; this
@@ -159,7 +159,7 @@ DISCOUNT_RATE = 0.03
 ANNUAL_BUDGET = 50000
 
 # Water Main Replacement Costs
-CIP_REPLACEMENT_COST_PER_INCH_FT = 120.00
+CIP_REPLACEMENT_COST_PER_INCH_FT = 25.00
 EMERGENCY_REPAIR_COST_PER_BREAK = 5000.00
 
 # Emergency replacement carries a premium over planned CIP work: mobilisation,
