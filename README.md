@@ -199,6 +199,7 @@ pip install pytest        # to run the test suite
 
 ```bash
 python leyp_optimizer.py                      # full optimization + reports
+python leyp_optimizer.py --cost-curve-only    # search, then write only the Pareto cost curve
 python leyp_runner.py --output-dir results \
     --budget 1000000 --trigger 1.5 \
     --seed 20260830 --replicates 5            # single strategy
@@ -209,13 +210,19 @@ pytest                                        # 140 tests
 
 | File | Description |
 |---|---|
-| `nsga2_results.csv` | Pareto front: objectives, genes, total cost, normalized position, distance to ideal |
+| `nsga2_results.csv` | Pareto front: present-value objectives, genes, total cost, normalized position, distance to ideal, and the nominal (undiscounted) investment, risk, total and average annual spend of each strategy |
 | `Optimal_Action_Plan.csv` | Year-by-year schedule for the selected strategy |
 | `cost_summary.csv` | Present values, undiscounted totals, and plan health metrics |
 | `simulation_diagnostics.csv` | Per-year CIP/emergency/break activity, budget utilization, discount factors, `Pipes_At_Floor`, `Floor_Pipes_Below_Onset` |
 | `optimization_curve.png` | Investment vs. risk cost with the Pareto front |
+| `pareto_cost_curve.png` | Nominal 100-year investment, risk and total cost along the front, the span within 5% of the minimum total, and the minimum-total and knee strategies with their average annual spend |
+| `pareto_cost_curve_data.csv` | `--cost-curve-only` runs only: the front behind `pareto_cost_curve.png` |
 | `validation_curve.png` | Three-panel validation |
 | `validation_data.csv` | Validation curve data with replicate spread |
+
+**`--cost-curve-only`** runs the same NSGA-II search and writes only `pareto_cost_curve.png` and `pareto_cost_curve_data.csv`. It skips the action plan, validation curve, `nsga2_results.csv` and the other charts, and leaves any of those already in the output directory as they were, so after a parameter change they will describe the earlier run.
+
+On `pareto_cost_curve.png`, "Minimum total cost" is the lowest point of the plotted *nominal* total. The `min_total_cost` selection rule minimises the *present-value* total, so the two can be different strategies; when the rule's pick is neither plotted point it is marked separately as "Lowest present-value cost — selected". Average annual spend is nominal investment ÷ 100 years, the average cash budget the strategy needs.
 
 `Optimal_Action_Plan.csv` records `Action` (`CIP_Replacement`, `Emergency_Replacement`, `Break_Event`), `Cause` for emergencies (always `break_failure` — the segment rule is the only route), `Life_Ratio` (age ÷ average life at the time of an emergency), `Backlog` marking the first replacement of an inherited-backlog pipe, `Priority` (the ranking value, captured before the pipe is reset), and `Annualized_Risk`.
 
