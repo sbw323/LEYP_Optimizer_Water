@@ -54,3 +54,33 @@ def inventory_csv(tmp_path):
     path = tmp_path / "inventory.csv"
     df.to_csv(path, index=False)
     return str(path)
+
+
+# --- A seconds-long optimizer run (used by the optimizer output tests) ---------
+
+
+@pytest.fixture
+def tiny_config(inventory_csv):
+    return {
+        "master_input_file": inventory_csv,
+        "output_base_dir": "out",
+        "skip_segmentation": True,
+        "genes": {"budget": {"min": 10_000, "max": 200_000},
+                  "rehab_trigger": {"min": 1.0, "max": 3.5}},
+        "discount_rate": 0.03,
+        "simulation": {"seed": 7, "n_replicates": 1},
+        "validation": {"n_points": 3},
+        "selection": "knee",
+        "plateau_tolerance": 0.05,
+        "algorithm": {"pop_size": 6, "n_offsprings": 3, "n_gen": 2, "seed": 1},
+    }
+
+
+@pytest.fixture
+def tiny_optimizer(tiny_config, tmp_path, monkeypatch):
+    """A seconds-long optimizer run on the three-pipe inventory, in tmp_path."""
+    monkeypatch.chdir(tmp_path)
+    import leyp_optimizer
+
+    monkeypatch.setattr(leyp_optimizer, "load_config", lambda: tiny_config)
+    return tmp_path / "out"

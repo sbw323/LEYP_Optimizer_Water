@@ -532,14 +532,7 @@ def run_simulation(
 
     if generate_report:
         if output_dir:
-            # Report from the replicate nearest the mean total cost, so the
-            # action plan is representative of the returned figures rather
-            # than an arbitrary draw.
-            mean_total = investment_cost + risk_cost
-            representative = min(
-                replicates,
-                key=lambda r: abs((r["investment_cost"] + r["risk_cost"]) - mean_total),
-            )
+            representative = representative_replicate(replicates)
             _generate_reports(
                 output_dir,
                 representative,
@@ -550,6 +543,36 @@ def run_simulation(
         return investment_cost, risk_cost, cip_cost, emergency_cost, total_breaks
 
     return investment_cost, risk_cost
+
+
+def representative_replicate(replicates: list) -> dict:
+    """The replicate whose total cost is nearest the mean across replicates.
+
+    Reports are written from it, so the action plan is representative of the
+    returned (mean) figures rather than an arbitrary draw.
+    """
+    mean_total = (float(np.mean([r["investment_cost"] for r in replicates]))
+                  + float(np.mean([r["risk_cost"] for r in replicates])))
+    return min(replicates, key=lambda r: abs((r["investment_cost"] + r["risk_cost"]) - mean_total))
+
+
+def action_plan_frame(actions: list) -> pd.DataFrame:
+    """A replicate's action log as written to an action-plan CSV.
+
+    Sorted by year (CIP actions are appended after the simulation loop and
+    land out of order), with the per-action optional columns filled.
+    """
+    action_df = pd.DataFrame(actions)
+    if action_df.empty:
+        return action_df
+    action_df = action_df.sort_values("Year", ignore_index=True)
+    if "Breaks" in action_df.columns:
+        action_df["Breaks"] = action_df["Breaks"].fillna(0).astype(int)
+    if "Cause" in action_df.columns:
+        action_df["Cause"] = action_df["Cause"].fillna("")
+    if "Backlog" in action_df.columns:
+        action_df["Backlog"] = action_df["Backlog"].fillna(False).astype(bool)
+    return action_df
 
 
 def _mean_life_ratio_at_emergency(actions: list) -> float:
@@ -590,17 +613,7 @@ def _generate_reports(
     # --- Action log ---
     all_actions = representative["actions"]
     if all_actions:
-        action_df = pd.DataFrame(all_actions)
-        # Sort chronologically (CIP actions from ReplacementManager are
-        # appended after the simulation loop and land out of order)
-        action_df = action_df.sort_values("Year", ignore_index=True)
-        # Fill missing Breaks column for non-break rows
-        if "Breaks" in action_df.columns:
-            action_df["Breaks"] = action_df["Breaks"].fillna(0).astype(int)
-        if "Cause" in action_df.columns:
-            action_df["Cause"] = action_df["Cause"].fillna("")
-        if "Backlog" in action_df.columns:
-            action_df["Backlog"] = action_df["Backlog"].fillna(False).astype(bool)
+        action_df = action_plan_frame(all_actions)
         action_csv_path = os.path.join(output_dir, "Optimal_Action_Plan.csv")
         safe_write_file(action_csv_path, action_df.to_csv(index=False))
 

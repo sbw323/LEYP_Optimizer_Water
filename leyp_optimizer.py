@@ -43,12 +43,18 @@ from checkpoint import (
 )
 from leyp_config import (
     BACKLOG_CONDITION,
+    DISCOUNT_RATE,
     NSGA2_CHECKPOINT_EVERY_N_GEN,
     NSGA2_CHECKPOINT_PATH,
     SIMULATION_YEARS,
 )
 from leyp_preprocessor import preprocess_network
-from leyp_runner import run_simulation, simulate
+from leyp_runner import (
+    action_plan_frame,
+    representative_replicate,
+    run_simulation,
+    simulate,
+)
 from water_validation import (
     generate_validation_curve,
     plot_validation_curve,
@@ -235,7 +241,9 @@ def add_nominal_costs(df, config, input_path):
         )
         rows.append(r)
 
-    out["Discount_Rate"] = float(config.get("discount_rate") or 0.0)
+    # The rate the simulation applied (its default when the config has none).
+    out["Discount_Rate"] = float(rows[0]["discount_rate"]) if rows else float(
+        config.get("discount_rate") or 0.0)
     out["Nominal_Investment"] = [r["nominal_investment_cost"] for r in rows]
     out["Nominal_Risk"] = [r["nominal_risk_cost"] for r in rows]
     out["Nominal_Total"] = out["Nominal_Investment"] + out["Nominal_Risk"]
@@ -337,46 +345,41 @@ class Water_LEYP_Problem(ElementwiseProblem):
 
 
 
-def run_optimization(cost_curve_only=False):
-    """Run the NSGA-II search and write its outputs.
+def _configured_rate(config):
+    """The objectives' discount rate: the config's, else the model default."""
+    rate = config.get("discount_rate")
+    return float(DISCOUNT_RATE if rate is None else rate)
 
-    Args:
-        cost_curve_only: Write only the nominal Pareto cost curve
-            (pareto_cost_curve.png and pareto_cost_curve_data.csv). The action
-            plan, cost summary, diagnostics, nsga2_results.csv and the other
-            charts are not written, so files already in the output directory
-            from an earlier full run are left as they were.
+
+def _prepare_input(config):
+    """Preprocess the inventory into OPTIMIZED_INPUT_PATH; return that path."""
+    preprocess_network(input_path=config["master_input_file"], output_path=OPTIMIZED_INPUT_PATH,
+                       skip_segmentation=config.get("skip_segmentation", False))
+    return OPTIMIZED_INPUT_PATH
+
+
+def run_search(config, input_path, discount_rate=None, checkpoint_path=NSGA2_CHECKPOINT_PATH):
+    """One NSGA-II search, returning its front with nominal costs and counts.
+
+    The search is the one a full run performs (algorithm, seeds, genes and
+    replicates from the config); only the discount rate of the objectives can
+    be overridden. Each rate should checkpoint to its own file, so a resumed
+    search can never continue one started at a different rate.
+
+    Returns:
+        (front, checkpoint). The front is annotated, sorted by total cost and
+        carries the add_nominal_costs columns. The caller removes the
+        checkpoint once the front is safely written.
     """
-    print("=== LEYP Genetic Optimizer (NSGA-II) ===")
-    if cost_curve_only:
-        print("Mode: cost curve only")
-    config = load_config()
-    # Checked before the search, not after twenty minutes of it.
-    method, plateau_tol = selection_settings(config)
-    raw_input = config["master_input_file"]
-    output_dir = config["output_base_dir"]
-    skip_seg = config.get("skip_segmentation", False)
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Preprocessing
-    optimized_input_path = OPTIMIZED_INPUT_PATH
-    try:
-        preprocess_network(
-            input_path=raw_input, output_path=optimized_input_path, skip_segmentation=skip_seg
-        )
-    except Exception as e:
-        print(f"Data Prep Error: {e}")
-        return
-
-    # Algorithm Setup with Checkpoint Integration
-    alg = config["algorithm"]
+    cfg = dict(config)
+    if discount_rate is not None:
+        cfg["discount_rate"] = float(discount_rate)
+    alg = cfg["algorithm"]
 
     opt_ckpt = OptimizationCheckpoint(
-        checkpoint_path=NSGA2_CHECKPOINT_PATH,
+        checkpoint_path=checkpoint_path,
         save_every_n_gen=NSGA2_CHECKPOINT_EVERY_N_GEN,
     )
-
     algorithm = opt_ckpt.restore_or_create(
         lambda: NSGA2(
             pop_size=alg["pop_size"],
@@ -387,33 +390,61 @@ def run_optimization(cost_curve_only=False):
             eliminate_duplicates=True,
         )
     )
-
     if opt_ckpt.resumed_from_gen > 0:
         print(f"Resuming from generation {opt_ckpt.resumed_from_gen}")
 
-    termination = get_termination("n_gen", alg["n_gen"])
-
-    print(f"Starting Evolution ({alg['n_gen']} gens)...")
+    print(f"Starting Evolution ({alg['n_gen']} gens, objectives "
+          f"{_basis_text(_configured_rate(cfg))})...")
     res = minimize(
-        Water_LEYP_Problem(config, optimized_input_path),
+        Water_LEYP_Problem(cfg, input_path),
         algorithm,
-        termination,
+        get_termination("n_gen", alg["n_gen"]),
         callback=opt_ckpt.get_callback(),
         seed=alg["seed"],
         verbose=True,
     )
 
-    # Results Processing
-    # Objectives are present values at config["discount_rate"].
-    cols = ["Investment_Cost", "Risk_Cost"]
-    df = pd.DataFrame(res.F, columns=cols)
+    # Objectives are present values at the search's discount rate.
+    df = pd.DataFrame(res.F, columns=["Investment_Cost", "Risk_Cost"])
     df["Budget"] = res.X[:, 0]
     df["Rehab_Trigger"] = res.X[:, 1]
     df["Total_Cost"] = df["Investment_Cost"] + df["Risk_Cost"]
     df = annotate_front(df).sort_values("Total_Cost", ignore_index=True)
 
     print("\n--- Computing nominal costs along the front ---")
-    df = add_nominal_costs(df, config, optimized_input_path)
+    return add_nominal_costs(df, cfg, input_path), opt_ckpt
+
+
+def run_optimization(cost_curve_only=False):
+    """Run the NSGA-II search and write its outputs.
+
+    Args:
+        cost_curve_only: Write only the nominal Pareto cost curve
+            (pareto_cost_curve.png and pareto_cost_curve_data.csv). The action
+            plan, cost summary, diagnostics, nsga2_results.csv and the other
+            charts are not written, so files already in the output directory
+            from an earlier full run are left as they were. No plan export and
+            no sensitivity sweep.
+    """
+    print("=== LEYP Genetic Optimizer (NSGA-II) ===")
+    if cost_curve_only:
+        print("Mode: cost curve only")
+    config = load_config()
+    # Checked before the search, not after twenty minutes of it.
+    method, plateau_tol = selection_settings(config)
+    sens = sensitivity_settings(config)
+    export_plans = bool(config.get("export_strategy_plans", True))
+    output_dir = config["output_base_dir"]
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    try:
+        optimized_input_path = _prepare_input(config)
+    except Exception as e:
+        print(f"Data Prep Error: {e}")
+        return
+
+    df, opt_ckpt = run_search(config, optimized_input_path)
 
     if cost_curve_only:
         curve = plot_pareto_cost_curve(df, output_dir, selection=method, band_tolerance=plateau_tol)
@@ -435,7 +466,7 @@ def run_optimization(cost_curve_only=False):
 
     # Charts, the strategy summary and the selection report
     print("\n--- Selecting a strategy ---")
-    report = write_report_outputs(df, output_dir, method, plateau_tol)
+    report = write_report_outputs(df, output_dir, method, plateau_tol, export_plans=export_plans)
 
     # --- VICTORY LAP: Generate Detailed Schedule for Best Strategy ---
     print("\n--- Generating Optimal Action Plan ---")
@@ -469,6 +500,10 @@ def run_optimization(cost_curve_only=False):
     except Exception as e:
         print(f"Error generating action plan: {e}")
 
+    if export_plans:
+        print("\n--- Exporting one action plan per marked strategy ---")
+        export_strategy_plans(df, output_dir, config, optimized_input_path)
+
     # --- VALIDATION CURVE GENERATION ---
     print("\n--- Generating Validation Curve ---")
     try:
@@ -494,10 +529,244 @@ def run_optimization(cost_curve_only=False):
     except Exception as e:
         print(f"Error generating validation curve: {e}")
 
-    # Cleanup optimization checkpoint on success
+    # The main run's front is safely written: drop its checkpoint before the
+    # sweep, which checkpoints each rate to a file of its own.
     opt_ckpt.cleanup()
+
+    if sens["enabled"]:
+        print("\n--- Discount-rate sensitivity sweep ---")
+        run_sensitivity(config, optimized_input_path, base_front=df)
+
     print("\n=== Optimization Complete ===")
     return df
+
+
+# --- Strategy plan export ----------------------------------------------------------
+
+# One action plan per strategy marked on the optimisation chart, named after
+# its call-out.
+PLAN_FILES = {
+    "min_total_cost": "Action_Plan_Min_Total_Cost.csv",
+    "knee": "Action_Plan_Knee_Balanced.csv",
+    "max_marginal_return": "Action_Plan_Max_Marginal_Return.csv",
+}
+
+
+def export_strategy_plans(df, output_dir, config, input_path, window=MARGINAL_WINDOW):
+    """Write one action plan per rule's strategy (PLAN_FILES).
+
+    Each strategy is re-simulated with the run's seed, replicates and rate,
+    and the replicate nearest the mean total cost is written, the same choice
+    as Optimal_Action_Plan.csv, so the selected strategy's export is
+    identical to it. Rules that pick the same strategy each still get their
+    file.
+
+    Returns:
+        {rule: path written}.
+    """
+    sim = config.get("simulation", {}) or {}
+    written = {}
+    for rule in SELECTION_METHODS:
+        row = df.loc[select_strategy(df, rule, window)]
+        r = simulate(
+            input_path,
+            annual_budget=float(row["Budget"]),
+            rehab_trigger=float(row["Rehab_Trigger"]),
+            seed=sim.get("seed"),
+            n_replicates=int(sim.get("n_replicates", 1)),
+            discount_rate=config.get("discount_rate"),
+        )
+        plan = action_plan_frame(representative_replicate(r["replicates"])["actions"])
+        path = os.path.join(output_dir, PLAN_FILES[rule])
+        safe_write_file(path, plan.to_csv(index=False))
+        written[rule] = path
+        print(f"  {PICK_STYLES[rule][3]}: budget ${row['Budget']:,.0f}/yr, trigger "
+              f"{row['Rehab_Trigger']:.2f} -> {path} ({len(plan)} actions)")
+    return written
+
+
+# --- Discount-rate sensitivity sweep ------------------------------------------------
+
+DEFAULT_SENSITIVITY_RATES = (0.0, 0.03, 0.05)
+_RULE_SHORT = {"min_total_cost": "min-total", "knee": "knee", "max_marginal_return": "max-marginal-return"}
+
+
+def sensitivity_settings(config):
+    """The validated `sensitivity` block: enabled, discount_rates, strategy.
+
+    The sweep's strategy is independent of `selection` and defaults to knee.
+    """
+    sens = config.get("sensitivity") or {}
+    rates = sens.get("discount_rates", list(DEFAULT_SENSITIVITY_RATES))
+    if not isinstance(rates, (list, tuple)) or not rates:
+        raise ValueError("sensitivity.discount_rates must be a non-empty list of rates")
+    rates = [float(r) for r in rates]
+    if any(not 0.0 <= r < 1.0 for r in rates):
+        raise ValueError(f"sensitivity.discount_rates must lie in [0, 1), got {rates}")
+    if len({round(r, 12) for r in rates}) != len(rates):
+        raise ValueError(f"sensitivity.discount_rates has duplicates: {rates}")
+    strategy = sens.get("strategy", "knee")
+    if strategy not in SELECTION_METHODS:
+        raise ValueError(f"sensitivity.strategy: {strategy!r} is not one of {SELECTION_METHODS}")
+    return {"enabled": bool(sens.get("enabled", False)), "discount_rates": rates,
+            "strategy": strategy}
+
+
+def _rate_label(rate):
+    """Column heading: Nominal, 3%, 5%."""
+    return "Nominal" if rate == 0 else f"{rate * 100:g}%"
+
+
+def _rate_tag(rate):
+    """File-name tag: 0pct, 3pct, 2.5pct."""
+    return f"{rate * 100:g}pct"
+
+
+def _plain_money(dollars):
+    """$144k or $1.94M, for tables (no mathtext escape)."""
+    return f"${dollars / 1e6:,.2f}M" if dollars >= 1e6 else f"${dollars / 1e3:,.0f}k"
+
+
+def sensitivity_table(picks, strategy, years=SIMULATION_YEARS):
+    """The sensitivity summary: one column per rate, three rows.
+
+    Args:
+        picks: One dict per rate, in column order, with rate, annual_budget,
+            rehab_trigger, avg_annual_spend, failures and at_budget_ceiling.
+        strategy: The rule the picks were made with (labels the rows).
+
+    Returns:
+        DataFrame indexed by row label, columns Nominal / 3% / 5% ...
+    """
+    who = _RULE_SHORT[strategy]
+    rows = {
+        f"Recommended avg spend ({who} pick)":
+            [f"{_plain_money(p['avg_annual_spend'])}/yr" for p in picks],
+        f"Failures (breaks) over {years} yr at the {who} pick":
+            [f"{p['failures']:,.0f}" for p in picks],
+        f"Strategy type at the {who} pick":
+            [f"{_plain_money(p['annual_budget'])}/yr budget, replace at condition "
+             f"≤ {p['rehab_trigger']:.2f}" + (", at the budget ceiling" if p["at_budget_ceiling"] else "")
+             for p in picks],
+    }
+    table = pd.DataFrame(rows, index=[_rate_label(p["rate"]) for p in picks]).T
+    table.index.name = "metric"
+    return table
+
+
+def _markdown(table):
+    head = "| | " + " | ".join(table.columns) + " |"
+    rule = "|---|" + "---|" * len(table.columns)
+    body = ["| " + label + " | " + " | ".join(row) + " |" for label, row in table.iterrows()]
+    return "\n".join([head, rule, *body])
+
+
+def run_sensitivity(config, input_path, base_front=None):
+    """Re-optimise at each sensitivity rate and tabulate the chosen strategy.
+
+    The discount rate changes the objectives, so it changes the front and the
+    strategy each rule picks; re-pricing one fixed plan would repeat the same
+    spend, failures and strategy in every column. A front already searched at
+    one of the rates (``base_front``) is reused for that column.
+
+    Writes discount_sensitivity.csv (the summary), discount_sensitivity_detail.csv
+    (the picks as numbers) and sensitivity/nsga2_results_rate_<rate>.csv (each
+    rate's front) to the output directory, and prints the table as markdown.
+
+    Returns:
+        Dict with the summary table, the detail frame and the fronts by rate.
+    """
+    sens = sensitivity_settings(config)
+    strategy = sens["strategy"]
+    output_dir = config["output_base_dir"]
+    sweep_dir = os.path.join(output_dir, "sensitivity")
+    os.makedirs(sweep_dir, exist_ok=True)
+    ceiling = float(config["genes"]["budget"]["max"])
+
+    picks, fronts = [], {}
+    for rate in sens["discount_rates"]:
+        if base_front is not None and abs(_discount_rate(base_front) - rate) < 1e-12:
+            front, source = base_front, "reused"
+            print(f"\n[{_rate_label(rate)}] reusing the front already searched at this rate")
+        else:
+            print(f"\n[{_rate_label(rate)}] searching with objectives at {_basis_text(rate)}")
+            front, ckpt = run_search(config, input_path, discount_rate=rate,
+                                     checkpoint_path=f"nsga2_checkpoint_rate_{_rate_tag(rate)}.pkl")
+            source = "searched"
+        path = os.path.join(sweep_dir, f"nsga2_results_rate_{_rate_tag(rate)}.csv")
+        safe_write_file(path, front.to_csv(index=False))
+        if source == "searched":
+            ckpt.cleanup()
+        fronts[rate] = front
+
+        row = front.loc[select_strategy(front, strategy)]
+        picks.append({
+            "rate": rate, "rate_label": _rate_label(rate), "source": source, "strategy": strategy,
+            "annual_budget": float(row["Budget"]), "rehab_trigger": float(row["Rehab_Trigger"]),
+            "at_budget_ceiling": bool(row["Budget"] >= 0.98 * ceiling),
+            "avg_annual_spend": float(row["Avg_Annual_Spend"]),
+            "failures": float(row["Failures"]),
+            "emergency_replaced_pipes": float(row["Emergency_Replaced_Pipes"]),
+            "investment_objective": float(row["Investment_Cost"]),
+            "risk_objective": float(row["Risk_Cost"]),
+            "total_objective": float(row["Total_Cost"]),
+            "n_front_points": len(front),
+        })
+
+    table = sensitivity_table(picks, strategy)
+    detail = pd.DataFrame(picks)
+    safe_write_file(os.path.join(output_dir, "discount_sensitivity.csv"), table.to_csv())
+    safe_write_file(os.path.join(output_dir, "discount_sensitivity_detail.csv"),
+                    detail.to_csv(index=False))
+    print(f"\nDiscount-rate sensitivity ({strategy} pick), saved to "
+          f"{os.path.join(output_dir, 'discount_sensitivity.csv')}:\n")
+    print(_markdown(table))
+    if detail["at_budget_ceiling"].any():
+        print("\n  [warning] At least one pick sits at the budget gene ceiling; the optimum "
+              "at that rate may lie above it.")
+    return {"table": table, "detail": detail, "fronts": fronts}
+
+
+def _verified_saved_front(config, input_path, rates):
+    """The saved nsga2_results.csv, if it can stand in for one sweep rate.
+
+    It must exist, have been searched at one of ``rates``, and reproduce
+    exactly under the current model and config (every front point is
+    re-simulated). Otherwise None, with the reason printed.
+    """
+    path = os.path.join(config["output_base_dir"], "nsga2_results.csv")
+    if not os.path.exists(path):
+        print(f"No saved front at {path}; every rate will be searched.")
+        return None
+    df = pd.read_csv(path)
+    rate = float(df["Discount_Rate"].iloc[0]) if "Discount_Rate" in df.columns else _configured_rate(config)
+    if not any(abs(rate - r) < 1e-12 for r in rates):
+        print(f"Saved front was searched at {_basis_text(rate)}, not a sweep rate; it is not reused.")
+        return None
+    print(f"Checking the saved front ({len(df)} strategies at {_basis_text(rate)}) still reproduces...")
+    checked = add_nominal_costs(df, {**config, "discount_rate": rate}, input_path)
+    if checked.attrs["pv_reproduction_error"] > 1.0:
+        print("  It does not (different model or configuration); every rate will be searched.")
+        return None
+    print("  It does; reusing it for that rate.")
+    return checked
+
+
+def run_sensitivity_only():
+    """The discount-rate sweep alone: no action plan, charts or validation.
+
+    Reuses the saved front for its rate when it still reproduces, so that
+    column agrees with the committed action plan; searches the other rates.
+    """
+    print("=== LEYP Optimizer: discount-rate sensitivity sweep ===")
+    config = load_config()
+    sens = sensitivity_settings(config)
+    os.makedirs(config["output_base_dir"], exist_ok=True)
+    input_path = _prepare_input(config)
+    base = _verified_saved_front(config, input_path, sens["discount_rates"])
+    result = run_sensitivity(config, input_path, base_front=base)
+    print("\n=== Sensitivity sweep complete ===")
+    return result
 
 
 # --- Reporting -----------------------------------------------------------------
@@ -815,7 +1084,7 @@ def _range(series, fmt="{:.0f}"):
 
 def write_strategy_summary(df, path, selection="min_total_cost",
                            plateau_tolerance=DEFAULT_PLATEAU_TOLERANCE,
-                           years=SIMULATION_YEARS, window=MARGINAL_WINDOW):
+                           years=SIMULATION_YEARS, window=MARGINAL_WINDOW, plan_files=None):
     """One row per rule's strategy plus one for the plateau.
 
     Holds what report text quotes so the figure can stay uncluttered.
@@ -823,6 +1092,8 @@ def write_strategy_summary(df, path, selection="min_total_cost",
     value at the run's rate, or nominal); the nominal investment and the
     average annual spend are always nominal. The risk avoided per dollar is
     the windowed slope of the front (about 1 at the minimum-total point).
+    With ``plan_files`` ({rule: file name}) a plan_file column names each
+    strategy's exported action plan.
 
     Returns:
         The summary DataFrame, also written to ``path``.
@@ -854,6 +1125,8 @@ def write_strategy_summary(df, path, selection="min_total_cost",
             "backlog_pipes": col(row, "Backlog_Pipes"),
             "backlog_length_ft": col(row, "Backlog_Length"),
         })
+        if plan_files:
+            rows[-1]["plan_file"] = plan_files[m]
     rows.append({
         "strategy": f"plateau (total within {_format_tolerance(plateau_tolerance)} of minimum)",
         "selected": False, "basis": basis,
@@ -872,7 +1145,8 @@ def write_strategy_summary(df, path, selection="min_total_cost",
 
 
 def write_report_outputs(df, output_dir, selection="min_total_cost",
-                         plateau_tolerance=DEFAULT_PLATEAU_TOLERANCE, window=MARGINAL_WINDOW):
+                         plateau_tolerance=DEFAULT_PLATEAU_TOLERANCE, window=MARGINAL_WINDOW,
+                         export_plans=False):
     """Charts, strategy summary and console report for a front.
 
     Writes optimization_curve.png (objective basis), pareto_cost_curve.png
@@ -909,7 +1183,8 @@ def write_report_outputs(df, output_dir, selection="min_total_cost",
     nominal = plot_pareto_cost_curve(df, output_dir, selection, plateau_tolerance, window=window)
     plot_pareto_front(df, output_dir)
     summary = write_strategy_summary(df, os.path.join(output_dir, "selected_strategies.csv"),
-                                     selection, plateau_tolerance, window=window)
+                                     selection, plateau_tolerance, window=window,
+                                     plan_files=PLAN_FILES if export_plans else None)
     return {"picks": picks, "selected_index": picks[selection], "plateau": plateau,
             "summary": summary, "curve": curve, "nominal_curve": nominal}
 
@@ -920,12 +1195,15 @@ def replot():
     Reads nsga2_results.csv from the output directory and applies the config's
     current ``selection`` and ``plateau_tolerance``. A front saved before the
     nominal and count columns existed is re-simulated once (exact with the
-    configured seed) and saved back with them. The action plan, cost summary,
-    diagnostics and validation curve need a full run and are not touched.
+    configured seed) and saved back with them. With export_strategy_plans on,
+    the per-strategy action plans are re-simulated and written (no search).
+    Optimal_Action_Plan.csv, the cost summary, diagnostics and validation
+    curve need a full run and are not touched.
     """
     print("=== LEYP Optimizer: redraw from the saved front ===")
     config = load_config()
     method, plateau_tol = selection_settings(config)
+    export_plans = bool(config.get("export_strategy_plans", True))
     output_dir = config["output_base_dir"]
     results_path = os.path.join(output_dir, "nsga2_results.csv")
     if not os.path.exists(results_path):
@@ -939,8 +1217,7 @@ def replot():
                              "front cannot be re-simulated exactly; run a full optimisation")
         print(f"Saved front lacks {missing}; re-simulating its {len(df)} strategies...")
         if not os.path.exists(OPTIMIZED_INPUT_PATH):
-            preprocess_network(input_path=config["master_input_file"], output_path=OPTIMIZED_INPUT_PATH,
-                               skip_segmentation=config.get("skip_segmentation", False))
+            _prepare_input(config)
         df = add_nominal_costs(df, config, OPTIMIZED_INPUT_PATH)
         error = df.attrs["pv_reproduction_error"]
         if error > 1.0:
@@ -950,7 +1227,12 @@ def replot():
         safe_write_file(results_path, df.to_csv(index=False))
         print(f"  Reproduced the saved objectives exactly; added the columns to {results_path}")
 
-    report = write_report_outputs(df, output_dir, method, plateau_tol)
+    report = write_report_outputs(df, output_dir, method, plateau_tol, export_plans=export_plans)
+    if export_plans:
+        print("\n--- Exporting one action plan per marked strategy ---")
+        if not os.path.exists(OPTIMIZED_INPUT_PATH):
+            _prepare_input(config)
+        report["plan_files"] = export_strategy_plans(df, output_dir, config, OPTIMIZED_INPUT_PATH)
     print("Optimal_Action_Plan.csv, cost_summary.csv, simulation_diagnostics.csv and the validation "
           "curve were not regenerated: they describe the strategy chosen by the last full run. "
           "Run a full optimisation if `selection` has changed since.")
@@ -973,7 +1255,14 @@ def _parse_args(argv=None):
         "--plot-only", action="store_true",
         help="No search: redraw optimization_curve.png, pareto_cost_curve.png, pareto_front.png "
              "and selected_strategies.csv from the saved nsga2_results.csv with the config's "
-             "current selection and plateau_tolerance. The action plan is not regenerated.",
+             "current selection and plateau_tolerance, and the per-strategy action plans if "
+             "export_strategy_plans is on. Optimal_Action_Plan.csv is not regenerated.",
+    )
+    mode.add_argument(
+        "--sensitivity-only", action="store_true",
+        help="Run only the discount-rate sensitivity sweep (optimizer_config.yaml "
+             "sensitivity block): re-optimise at each rate and write discount_sensitivity.csv. "
+             "Reuses the saved front for its rate when it still reproduces.",
     )
     return parser.parse_args(argv)
 
@@ -982,5 +1271,7 @@ if __name__ == "__main__":
     args = _parse_args()
     if args.plot_only:
         replot()
+    elif args.sensitivity_only:
+        run_sensitivity_only()
     else:
         run_optimization(cost_curve_only=args.cost_curve_only)

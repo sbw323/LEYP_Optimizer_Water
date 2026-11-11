@@ -72,3 +72,21 @@ algorithm:
   n_offsprings: 16
   n_gen: 30
   seed: 895
+
+# 9. OUTPUTS
+# Write one action plan per strategy marked on the optimisation chart, named
+# after its call-out: Action_Plan_Min_Total_Cost.csv,
+# Action_Plan_Knee_Balanced.csv, Action_Plan_Max_Marginal_Return.csv. The
+# selected one is identical to Optimal_Action_Plan.csv. About 30 s extra.
+export_strategy_plans: true
+
+# 10. DISCOUNT-RATE SENSITIVITY
+# Re-optimises at each rate and tabulates the chosen strategy's average
+# annual spend, failures (breaks) and strategy type per rate in
+# discount_sensitivity.csv. Each extra rate is a full search (about 20 min at
+# the settings above); the run's own rate reuses the main front.
+# Run on demand with:  python leyp_optimizer.py --sensitivity-only
+sensitivity:
+  enabled: false
+  discount_rates: [0.0, 0.03, 0.05]
+  strategy: knee          # independent of `selection`
