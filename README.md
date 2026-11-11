@@ -206,10 +206,11 @@ pip install pytest        # to run the test suite
 python leyp_optimizer.py                      # full optimization + reports
 python leyp_optimizer.py --cost-curve-only    # search, then write only the nominal cost curve
 python leyp_optimizer.py --plot-only          # no search: redraw charts + summary from the saved front
+python leyp_optimizer.py --sensitivity-only   # discount-rate sweep only (0% / 3% / 5%)
 python leyp_runner.py --output-dir results \
     --budget 1000000 --trigger 1.5 \
     --seed 20260830 --replicates 5            # single strategy
-pytest                                        # 205 tests
+pytest                                        # 227 tests
 ```
 
 ### Key Output Files
@@ -218,7 +219,10 @@ pytest                                        # 205 tests
 |---|---|
 | `nsga2_results.csv` | Pareto front: present-value objectives, genes, total cost, normalized position, distance to ideal, the discount rate, and each strategy's nominal investment, risk, total and average annual spend, breaks, emergency-replaced pipes and inherited backlog |
 | `optimization_curve.png` | **Report figure.** 100-year investment, risk and total against investment along the front (present value at the run's rate), the plateau shaded, and the three rules' strategies marked with their nominal average annual spend; the selected one flagged in the legend |
-| `selected_strategies.csv` | One row per rule's strategy plus one for the plateau: selected flag, basis, budget, trigger, 100-year investment / risk / total, nominal investment, average annual spend, breaks, emergency-replaced pipes, inherited backlog, and risk avoided per dollar invested (≈ 1 at the minimum total); the plateau row gives its budget, trigger, investment, total and spend ranges and point count |
+| `selected_strategies.csv` | One row per rule's strategy plus one for the plateau: selected flag, basis, budget, trigger, 100-year investment / risk / total, nominal investment, average annual spend, breaks, emergency-replaced pipes, inherited backlog, risk avoided per dollar invested (≈ 1 at the minimum total), and the strategy's exported plan file; the plateau row gives its budget, trigger, investment, total and spend ranges and point count |
+| `Action_Plan_Min_Total_Cost.csv`, `Action_Plan_Knee_Balanced.csv`, `Action_Plan_Max_Marginal_Return.csv` | With `export_strategy_plans: true` (default): the year-by-year plan of each strategy marked on the chart, named after its call-out, in the same columns as `Optimal_Action_Plan.csv`. The selected strategy's file is identical to `Optimal_Action_Plan.csv` |
+| `discount_sensitivity.csv` | Sensitivity sweep only: the chosen strategy (default knee) at each rate — columns Nominal / 3% / 5%, rows average annual spend, failures (breaks) over 100 years, and strategy type |
+| `discount_sensitivity_detail.csv`, `sensitivity/nsga2_results_rate_*.csv` | Sensitivity sweep only: the picks as numbers, and each rate's full front |
 | `pareto_cost_curve.png` | The report figure on a nominal (undiscounted) basis, with the rules and plateau applied to nominal costs |
 | `pareto_front.png` | The front itself: risk against investment, coloured by total, with the ideal point and the three picks |
 | `Optimal_Action_Plan.csv` | Year-by-year schedule for the selected strategy |
@@ -229,6 +233,29 @@ pytest                                        # 205 tests
 | `validation_data.csv` | Validation curve data with replicate spread |
 
 **`--plot-only`** redraws `optimization_curve.png`, `pareto_cost_curve.png`, `pareto_front.png` and `selected_strategies.csv` from the saved `nsga2_results.csv`, applying the config's current `selection` and `plateau_tolerance`, without re-optimising. It does not regenerate the action plan, cost summary, diagnostics or validation curve — those need a full run — and says so. A front saved before the nominal and count columns existed is re-simulated once (exact with the configured seed; refused if the re-simulation does not reproduce the saved objectives) and saved back with them.
+
+**`--plot-only`** also re-simulates and writes the three `Action_Plan_*.csv` files when `export_strategy_plans` is on; it still leaves `Optimal_Action_Plan.csv` alone.
+
+### Discount-rate sensitivity
+
+The sweep answers: how does the recommendation change if the analysis discounts the future more, less, or not at all? The discount rate changes the objectives, so it changes the front and the strategy each rule picks — the sweep therefore **re-optimises at each rate**. (Re-pricing one fixed plan would be pointless: its spend, failures and strategy are the same at every rate.)
+
+```yaml
+sensitivity:
+  enabled: false            # true: run after a full optimisation
+  discount_rates: [0.0, 0.03, 0.05]
+  strategy: knee            # independent of `selection`
+```
+
+`python leyp_optimizer.py --sensitivity-only` runs it on demand. The front already searched at the configured rate is reused for that column — the run's own front in a full run, or the saved `nsga2_results.csv` with `--sensitivity-only` provided every point still reproduces exactly — so only the other rates cost a search (about 20 min each at the default settings). Each rate checkpoints to its own file (`nsga2_checkpoint_rate_5pct.pkl`), so a preempted sweep never resumes one rate from another's checkpoint. `discount_sensitivity.csv` holds one column per rate:
+
+| | Nominal | 3% | 5% |
+|---|---|---|---|
+| Recommended avg spend (knee pick) | nominal 100-yr investment ÷ 100 | … | … |
+| Failures (breaks) over 100 yr at the knee pick | mean over replicates, rounded | … | … |
+| Strategy type at the knee pick | e.g. "$178k/yr budget, replace at condition ≤ 1.25" | … | … |
+
+A pick at the budget gene ceiling is marked "at the budget ceiling", since the optimum at that rate may lie above it. The table is also printed as markdown.
 
 **`--cost-curve-only`** runs the same NSGA-II search and writes only `pareto_cost_curve.png` and `pareto_cost_curve_data.csv`. It skips the action plan, validation curve, `nsga2_results.csv` and the other charts, and leaves any of those already in the output directory as they were, so after a parameter change they will describe the earlier run.
 
@@ -308,6 +335,12 @@ validation:
 
 selection: min_total_cost   # or: knee, max_marginal_return
 plateau_tolerance: 0.05
+export_strategy_plans: true
+
+sensitivity:
+  enabled: false
+  discount_rates: [0.0, 0.03, 0.05]
+  strategy: knee
 
 algorithm:
   pop_size: 32
@@ -352,7 +385,7 @@ That ratio is noise-dominated at very small budgets: the two policies' stochasti
 ## Testing
 
 ```bash
-pytest                    # 205 tests
+pytest                    # 227 tests
 pytest tests/test_leyp_core.py -v
 ```
 
@@ -365,6 +398,7 @@ pytest tests/test_leyp_core.py -v
 | `test_calibration.py` | Feedback saturation, break-rate band, hazard stability, planning realism, discounting |
 | `test_optimizer.py` | Front annotation, selection rules, search sizing, config sanity |
 | `test_optimizer_report.py` | The three selection rules and the plateau on synthetic fronts, the report figure and strategy summary, `--cost-curve-only`, `--plot-only`, and that `selection` drives the action plan |
+| `test_plans_and_sensitivity.py` | Per-strategy plan export, the sensitivity settings and table, front reuse, per-rate checkpoints, and `--sensitivity-only` |
 | `test_validation.py` | Measured counts, distinct length axis, reported spread, sweep reach, baselines |
 
 ---

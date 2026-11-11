@@ -91,7 +91,7 @@ flowchart TD
         MIN["min_total_cost · default<br/>lowest PV investment + risk<br/>the economic optimum"]
         KNEE["knee<br/>closest to the normalised ideal point"]
         MMR["max_marginal_return<br/>steepest stretch of the front<br/>most risk avoided per extra dollar"]
-        OUT[/"Optimal_Action_Plan.csv · cost_summary.csv<br/>simulation_diagnostics.csv — includes the per-year counts<br/>optimization_curve.png · selected_strategies.csv<br/>pareto_cost_curve.png · pareto_front.png · validation_curve.png"/]
+        OUT[/"Optimal_Action_Plan.csv · cost_summary.csv<br/>simulation_diagnostics.csv — includes the per-year counts<br/>optimization_curve.png · selected_strategies.csv<br/>Action_Plan_*.csv per marked strategy<br/>pareto_cost_curve.png · pareto_front.png · validation_curve.png<br/>discount_sensitivity.csv — optional sweep"/]
         OBJ --> GEN
         GEN -->|yes| FRONT --> SEL
         SEL --> MIN --> OUT

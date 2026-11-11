@@ -236,3 +236,13 @@ seeds give the same front, and the same rule picks the same strategy.
 current `selection` and `plateau_tolerance` to the saved front without re-optimising, and
 does not rewrite the action plan.
 
+### Per-strategy plans and the discount-rate sweep
+
+| Output | Definition |
+|---|---|
+| `Action_Plan_<call-out>.csv` | Each marked strategy re-simulated with the run's seed, replicates and rate; the replicate nearest the mean total cost is written, the same choice as `Optimal_Action_Plan.csv` |
+| `discount_sensitivity.csv` | The search re-run with the objectives at each of `sensitivity.discount_rates` (0%, 3%, 5%); `sensitivity.strategy` (knee) picks one strategy per front. Rows: average annual spend (nominal), failures = breaks over 100 years (mean over replicates), and strategy type (budget, replacement trigger) |
+
+Every column uses the same model, seeds, genes and search settings; only the rate of the
+objectives differs. The column at the run's own rate reuses its front.
+
