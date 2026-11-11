@@ -47,13 +47,21 @@ validation:
   n_points: 15
 
 # 7. STRATEGY SELECTION
-# How one strategy is chosen from the Pareto front for the action plan.
-#   min_total_cost - lowest investment + risk (both are dollars, so this is a
-#                    real quantity, but it weights the two streams equally)
-#   knee           - closest to the ideal point once both objectives are
-#                    normalised; the best-balanced trade-off
-# The run prints what the other rule would have chosen either way.
+# Which Pareto-front strategy drives the Optimal Action Plan and is flagged
+# "selected" on the charts and in selected_strategies.csv. All three are always
+# marked and summarised, whichever is selected.
+#   min_total_cost      - lowest investment + risk: where the front's slope is
+#                         -1, so a dollar invested avoids a dollar of risk
+#   knee                - closest to the ideal point once both objectives are
+#                         min-max normalised; the best-balanced trade-off
+#   max_marginal_return - the steepest stretch of the front (slope over a
+#                         5-point window): best value per dollar, usually at low
+#                         investment with high remaining risk; not a spend level
 selection: knee
+# The plateau: front strategies whose total is within this fraction of the
+# minimum total. Shaded on the charts; strategies inside it are
+# interchangeable to within the tolerance.
+plateau_tolerance: 0.05
 
 # 8. ALGORITHM SETTINGS
 # Sized for a noisy two-gene objective: ~510 evaluations against the previous

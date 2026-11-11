@@ -10,15 +10,25 @@ Features:
 - 2 decision variables: budget, rehab_trigger
 - NSGA-II algorithm with preemption-safe checkpointing
 - Pareto frontier analysis and optimal action plan generation
+- Three selection rules (min_total_cost, knee, max_marginal_return), the
+  plateau of near-minimum strategies, a report figure and a strategy summary
 """
 
 import argparse
 import os
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 import yaml
+from matplotlib.path import Path
+from matplotlib.text import Text
+from matplotlib.transforms import Bbox
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.problem import ElementwiseProblem
 from pymoo.operators.crossover.sbx import SBX
@@ -31,7 +41,12 @@ from checkpoint import (
     OptimizationCheckpoint,
     safe_write_file,
 )
-from leyp_config import NSGA2_CHECKPOINT_EVERY_N_GEN, NSGA2_CHECKPOINT_PATH, SIMULATION_YEARS
+from leyp_config import (
+    BACKLOG_CONDITION,
+    NSGA2_CHECKPOINT_EVERY_N_GEN,
+    NSGA2_CHECKPOINT_PATH,
+    SIMULATION_YEARS,
+)
 from leyp_preprocessor import preprocess_network
 from leyp_runner import run_simulation, simulate
 from water_validation import (
@@ -42,6 +57,24 @@ from water_validation import (
 )
 
 CONFIG_FILE = "optimizer_config.yaml"
+OPTIMIZED_INPUT_PATH = "temp_optimization_input.csv"
+
+SELECTION_METHODS = ("min_total_cost", "knee", "max_marginal_return")
+MARGINAL_WINDOW = 5          # front points per window when locating the steepest stretch
+DEFAULT_PLATEAU_TOLERANCE = 0.05
+
+# Marker, colour, size and display name of each rule's strategy on the charts.
+PICK_STYLES = {
+    "min_total_cost": ("*", "tab:red", 230, "Minimum total cost"),
+    "knee": ("D", "tab:blue", 95, "Knee (balanced)"),
+    "max_marginal_return": ("^", "tab:green", 110, "Max marginal return"),
+}
+
+# Columns add_nominal_costs adds by re-simulating each front strategy.
+REEVALUATION_COLUMNS = (
+    "Nominal_Investment", "Nominal_Risk", "Nominal_Total", "Avg_Annual_Spend",
+    "Failures", "Emergency_Replaced_Pipes", "Backlog_Pipes", "Backlog_Length",
+)
 
 
 def annotate_front(df):
@@ -61,28 +94,108 @@ def annotate_front(df):
     return out
 
 
-def select_strategy(df, method="min_total_cost"):
+def marginal_return(df, window=MARGINAL_WINDOW):
+    """Risk avoided per dollar invested along the front.
+
+    Measured over a sliding window of ``window`` consecutive points (sorted by
+    investment) and assigned to the window's centre point: single segments of
+    an NSGA-II front are too noisy to use directly. A value of 1 means one
+    more dollar of investment avoids one dollar of risk.
+
+    Returns:
+        Series aligned with ``df``'s index; NaN where no window is centred.
+    """
+    front = df.sort_values("Investment_Cost", kind="stable")
+    inv = front["Investment_Cost"].to_numpy(dtype=float)
+    risk = front["Risk_Cost"].to_numpy(dtype=float)
+    idx = front.index.to_numpy()
+    out = pd.Series(np.nan, index=df.index)
+    n = len(front)
+    if n < 2:
+        return out
+    w = max(2, min(int(window), n))
+    for i in range(n - w + 1):
+        d_inv = inv[i + w - 1] - inv[i]
+        if d_inv > 0:
+            out[idx[i + w // 2]] = (risk[i] - risk[i + w - 1]) / d_inv
+    return out
+
+
+def select_strategy(df, method="min_total_cost", window=MARGINAL_WINDOW):
     """Choose one strategy from the Pareto front.
 
     Args:
-        df: Annotated front from annotate_front.
-        method: "min_total_cost" picks the lowest total lifecycle cost.
-            "knee" picks the solution closest to the ideal point once both
-            objectives are normalised — the best-balanced trade-off, which
-            does not assume the two dollar streams are interchangeable.
+        df: Front with Investment_Cost, Risk_Cost and Total_Cost.
+        method:
+            "min_total_cost": lowest investment + risk — where the front's
+                slope is -1, so a dollar invested avoids a dollar of risk.
+            "knee": closest to the ideal point (least investment, least risk)
+                once both objectives are min-max normalised to [0, 1].
+            "max_marginal_return": the steepest stretch of the front, where
+                each additional dollar invested avoids the most risk (slope
+                measured over ``window`` points). A best-value-per-dollar
+                point, usually at low investment with high remaining risk —
+                not a recommended spend level.
+        window: Front points per slope window for max_marginal_return.
 
     Returns:
         Index of the selected row.
     """
+    if method == "min_total_cost":
+        return df["Total_Cost"].idxmin()
     if method == "knee":
-        return df["Ideal_Distance"].idxmin()
-    if method != "min_total_cost":
-        raise ValueError(f"Unknown selection method: {method}")
-    return df["Total_Cost"].idxmin()
+        norm = []
+        for col in ("Investment_Cost", "Risk_Cost"):
+            lo, hi = df[col].min(), df[col].max()
+            norm.append(pd.Series(0.0, index=df.index) if hi == lo else (df[col] - lo) / (hi - lo))
+        return np.sqrt(norm[0] ** 2 + norm[1] ** 2).idxmin()
+    if method == "max_marginal_return":
+        mr = marginal_return(df, window)
+        if mr.isna().all():
+            return df["Investment_Cost"].idxmin()
+        return mr.idxmax()
+    raise ValueError(f"Unknown selection method: {method!r}. Use one of {SELECTION_METHODS}")
+
+
+def plateau_points(df, tolerance=DEFAULT_PLATEAU_TOLERANCE):
+    """Front points whose Total_Cost is within ``tolerance`` of the minimum.
+
+    Total cost is flat over a wide range of budgets near the optimum, so the
+    min_total_cost pick is one draw from this set. Points inside it are
+    interchangeable to within the tolerance.
+    """
+    return df[df["Total_Cost"] <= (1.0 + tolerance) * df["Total_Cost"].min()]
+
+
+def selection_settings(config):
+    """The configured selection rule and plateau tolerance, validated."""
+    method = config.get("selection", "min_total_cost")
+    if method not in SELECTION_METHODS:
+        raise ValueError(f"optimizer_config.yaml selection: {method!r} is not one of {SELECTION_METHODS}")
+    tol = float(config.get("plateau_tolerance", DEFAULT_PLATEAU_TOLERANCE))
+    if tol < 0:
+        raise ValueError(f"plateau_tolerance must be >= 0, got {tol}")
+    return method, tol
+
+
+def nominal_view(df):
+    """The front with its objective columns replaced by the nominal sums.
+
+    The three selection rules and the plateau can then be applied to nominal
+    costs exactly as they are to the objectives.
+    """
+    missing = {"Nominal_Investment", "Nominal_Risk"} - set(df.columns)
+    if missing:
+        raise ValueError(f"run add_nominal_costs first; missing {sorted(missing)}")
+    out = df.copy()
+    out["Investment_Cost"] = df["Nominal_Investment"]
+    out["Risk_Cost"] = df["Nominal_Risk"]
+    out["Total_Cost"] = df["Nominal_Investment"] + df["Nominal_Risk"]
+    return out
 
 
 def add_nominal_costs(df, config, input_path):
-    """Add undiscounted (nominal) cost columns to a Pareto front.
+    """Add nominal costs and per-strategy counts to a Pareto front.
 
     The optimizer's objectives are present values, so nominal totals are not
     in its result. Each front strategy is re-simulated with the seed, replicate
@@ -97,12 +210,15 @@ def add_nominal_costs(df, config, input_path):
         input_path: Inventory CSV the optimizer evaluated against.
 
     Returns:
-        A copy of ``df`` with Nominal_Investment, Nominal_Risk, Nominal_Total
-        and Avg_Annual_Spend (nominal investment per year of the horizon).
+        A copy of ``df`` with Discount_Rate (the rate of the objectives),
+        Nominal_Investment, Nominal_Risk, Nominal_Total, Avg_Annual_Spend
+        (nominal investment per year of the horizon), Failures (breaks over
+        the horizon), Emergency_Replaced_Pipes, and the inherited backlog
+        (Backlog_Pipes, Backlog_Length in ft) — all means over replicates.
     """
     sim = config.get("simulation", {}) or {}
     out = df.copy()
-    nominal_inv, nominal_risk, worst = [], [], 0.0
+    rows, worst = [], 0.0
     for _, row in out.iterrows():
         r = simulate(
             input_path,
@@ -117,13 +233,17 @@ def add_nominal_costs(df, config, input_path):
             abs(r["investment_cost"] - row["Investment_Cost"]),
             abs(r["risk_cost"] - row["Risk_Cost"]),
         )
-        nominal_inv.append(r["nominal_investment_cost"])
-        nominal_risk.append(r["nominal_risk_cost"])
+        rows.append(r)
 
-    out["Nominal_Investment"] = nominal_inv
-    out["Nominal_Risk"] = nominal_risk
+    out["Discount_Rate"] = float(config.get("discount_rate") or 0.0)
+    out["Nominal_Investment"] = [r["nominal_investment_cost"] for r in rows]
+    out["Nominal_Risk"] = [r["nominal_risk_cost"] for r in rows]
     out["Nominal_Total"] = out["Nominal_Investment"] + out["Nominal_Risk"]
     out["Avg_Annual_Spend"] = out["Nominal_Investment"] / SIMULATION_YEARS
+    out["Failures"] = [r["total_breaks"] for r in rows]
+    out["Emergency_Replaced_Pipes"] = [r["emergency_pipes"] for r in rows]
+    out["Backlog_Pipes"] = [r["backlog_pipes"] for r in rows]
+    out["Backlog_Length"] = [r["backlog_length"] for r in rows]
     out.attrs["pv_reproduction_error"] = worst
 
     if sim.get("seed") is None:
@@ -216,11 +336,12 @@ class Water_LEYP_Problem(ElementwiseProblem):
         out["F"] = [inv_cost, risk_cost]
 
 
+
 def run_optimization(cost_curve_only=False):
     """Run the NSGA-II search and write its outputs.
 
     Args:
-        cost_curve_only: Write only the Pareto cost curve
+        cost_curve_only: Write only the nominal Pareto cost curve
             (pareto_cost_curve.png and pareto_cost_curve_data.csv). The action
             plan, cost summary, diagnostics, nsga2_results.csv and the other
             charts are not written, so files already in the output directory
@@ -230,6 +351,8 @@ def run_optimization(cost_curve_only=False):
     if cost_curve_only:
         print("Mode: cost curve only")
     config = load_config()
+    # Checked before the search, not after twenty minutes of it.
+    method, plateau_tol = selection_settings(config)
     raw_input = config["master_input_file"]
     output_dir = config["output_base_dir"]
     skip_seg = config.get("skip_segmentation", False)
@@ -237,7 +360,7 @@ def run_optimization(cost_curve_only=False):
     os.makedirs(output_dir, exist_ok=True)
 
     # Preprocessing
-    optimized_input_path = "temp_optimization_input.csv"
+    optimized_input_path = OPTIMIZED_INPUT_PATH
     try:
         preprocess_network(
             input_path=raw_input, output_path=optimized_input_path, skip_segmentation=skip_seg
@@ -291,17 +414,16 @@ def run_optimization(cost_curve_only=False):
 
     print("\n--- Computing nominal costs along the front ---")
     df = add_nominal_costs(df, config, optimized_input_path)
-    method = config.get("selection", "min_total_cost")
 
     if cost_curve_only:
-        curve = plot_pareto_cost_curve(df, output_dir, selection=method)
+        curve = plot_pareto_cost_curve(df, output_dir, selection=method, band_tolerance=plateau_tol)
         data_path = os.path.join(output_dir, "pareto_cost_curve_data.csv")
         safe_write_file(data_path, df.to_csv(index=False))
         print(f"Cost curve data saved to {data_path}")
-        for label, idx in (("Minimum total cost", curve["min_index"]), ("Knee", curve["knee_index"])):
+        for rule, idx in curve["picks"].items():
             row = df.loc[idx]
-            print(f"  {label}: budget ${row['Budget']:,.0f}/yr, trigger {row['Rehab_Trigger']:.2f}, "
-                  f"average spend ${row['Avg_Annual_Spend']:,.0f}/yr")
+            print(f"  {PICK_STYLES[rule][3]} (nominal): budget ${row['Budget']:,.0f}/yr, "
+                  f"trigger {row['Rehab_Trigger']:.2f}, average spend ${row['Avg_Annual_Spend']:,.0f}/yr")
         print("  Action plan, validation curve and other outputs were not regenerated.")
         opt_ckpt.cleanup()
         print("\n=== Optimization Complete ===")
@@ -311,29 +433,15 @@ def run_optimization(cost_curve_only=False):
     safe_write_file(results_path, df.to_csv(index=False))
     print(f"Optimization results saved to {results_path}")
 
-    # Generate cost curve visualizations
-    plot_cost_curves(df, output_dir)
-    plot_pareto_cost_curve(df, output_dir, selection=method)
+    # Charts, the strategy summary and the selection report
+    print("\n--- Selecting a strategy ---")
+    report = write_report_outputs(df, output_dir, method, plateau_tol)
 
     # --- VICTORY LAP: Generate Detailed Schedule for Best Strategy ---
     print("\n--- Generating Optimal Action Plan ---")
-
-    # 1. Identify Best Strategy
-    best_idx = select_strategy(df, method)
-    best = df.loc[best_idx]
-
-    print(f"Selection rule: {method}")
-    print(f"Best Strategy Found: Total Cost ${best['Total_Cost']:,.0f}")
+    best = df.loc[report["selected_index"]]
+    print(f"Best Strategy Found ({method}): Total Cost ${best['Total_Cost']:,.0f}")
     print(f"Parameters: Budget=${best['Budget']:,.0f} | Rehab_Trigger={best['Rehab_Trigger']:.2f}")
-
-    # Report the alternative reading so the trade-off stays visible.
-    other = "knee" if method == "min_total_cost" else "min_total_cost"
-    alt = df.loc[select_strategy(df, other)]
-    if not alt.equals(best):
-        print(
-            f"  ({other} would pick Budget=${alt['Budget']:,.0f}, "
-            f"Trigger={alt['Rehab_Trigger']:.2f}, Total ${alt['Total_Cost']:,.0f})"
-        )
 
     if best["Budget"] >= config["genes"]["budget"]["max"] * 0.98:
         print(
@@ -392,96 +500,33 @@ def run_optimization(cost_curve_only=False):
     return df
 
 
-def plot_cost_curves(df, output_dir):
-    """Plot the Pareto front with both strategy picks and the ideal point marked.
+# --- Reporting -----------------------------------------------------------------
 
-    The front is drawn in order of investment so it reads as a trade-off curve.
-    The ``min_total_cost`` pick (lowest investment + risk) and the ``knee`` pick
-    (closest to the ideal point once both axes are normalised) are both marked,
-    with a dashed line from the ideal point to the knee so "closest to ideal" is
-    visible rather than asserted. Axes are in $M, present value.
 
-    Args:
-        df: Results DataFrame with Investment_Cost, Risk_Cost, Budget,
-            Rehab_Trigger and Total_Cost (annotated with Ideal_Distance if not
-            already).
-        output_dir: Directory for output files.
+def _discount_rate(df):
+    """The rate the front's objectives were discounted at (0 = nominal)."""
+    if "Discount_Rate" in df.columns and len(df):
+        return float(df["Discount_Rate"].iloc[0])
+    return 0.0
+
+
+def _basis_text(rate, convention=False):
+    if not rate:
+        return "nominal"
+    return f"present value at {rate:.1%}" + (" (end-of-year)" if convention else "")
+
+
+def _nominal_investment(df):
+    """Nominal investment over the horizon for every front row.
+
+    Equal to Investment_Cost when the objectives are undiscounted; otherwise
+    it must have been added by add_nominal_costs.
     """
-    if "Ideal_Distance" not in df.columns:
-        df = annotate_front(df)
-    front = df.sort_values("Investment_Cost")
-    inv_m, risk_m = front["Investment_Cost"] / 1e6, front["Risk_Cost"] / 1e6
-
-    fig, ax = plt.subplots(figsize=(11, 8))
-    ax.plot(inv_m, risk_m, "-", color="0.55", linewidth=1, alpha=0.8, zorder=1)
-    scatter = ax.scatter(
-        inv_m, risk_m, c=front["Total_Cost"] / 1e6, cmap="viridis",
-        s=42, alpha=0.9, zorder=2, edgecolors="white", linewidths=0.5,
-    )
-    fig.colorbar(scatter, ax=ax, label="Total cost, PV ($M)")
-
-    # Ideal point and the two picks.
-    ideal = (df["Investment_Cost"].min() / 1e6, df["Risk_Cost"].min() / 1e6)
-    ax.plot(*ideal, "x", color="0.3", markersize=9, markeredgewidth=1.5, zorder=3)
-    ax.annotate("ideal point", ideal, xytext=(8, -14), textcoords="offset points",
-                fontsize=8, color="0.3")
-
-    picks = (
-        ("min_total_cost", "*", "tab:red", 240, (12, 12)),
-        ("knee", "D", "tab:blue", 90, (-46, 10)),
-    )
-    for method, marker, colour, size, offset in picks:
-        row = df.loc[select_strategy(df, method)]
-        x, y = row["Investment_Cost"] / 1e6, row["Risk_Cost"] / 1e6
-        ax.scatter([x], [y], marker=marker, s=size, color=colour,
-                   edgecolors="black", linewidths=0.8, zorder=4,
-                   # Dollar signs are escaped: matplotlib otherwise reads them
-                   # as mathtext delimiters and italicises the text between.
-                   label=(f"{method}: budget \\${row['Budget']/1e6:.2f}M/yr, "
-                          f"trigger {row['Rehab_Trigger']:.2f}, "
-                          f"total \\${row['Total_Cost']/1e6:.1f}M"))
-        ax.annotate(method, (x, y), xytext=offset, textcoords="offset points",
-                    fontsize=9, color=colour, fontweight="bold")
-        if method == "knee":
-            ax.plot([ideal[0], x], [ideal[1], y], "--", color="tab:blue",
-                    linewidth=1, alpha=0.6, zorder=3)
-
-    ax.set_xlabel("Investment cost, PV ($M)")
-    ax.set_ylabel("Risk cost, PV ($M)")
-    ax.set_title("Pareto front: investment vs risk, with strategy picks")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right", fontsize=8, framealpha=0.95)
-
-    cost_curve_path = os.path.join(output_dir, "optimization_curve.png")
-    fig.savefig(cost_curve_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Cost curve saved to {cost_curve_path}")
-
-
-def _within_tolerance_runs(x, total, tol):
-    """Contiguous spans of the front whose total is within ``tol`` of the minimum.
-
-    Args:
-        x: Investment at each front point, sorted ascending.
-        total: Total cost at each point.
-        tol: Fractional tolerance, e.g. 0.05 for 5%.
-
-    Returns:
-        (x_start, x_end) for each run of consecutive points within tolerance.
-        A run of one point has x_start == x_end.
-    """
-    x = np.asarray(x, dtype=float)
-    ok = np.asarray(total, dtype=float) <= np.min(total) * (1.0 + tol)
-    runs, start = [], None
-    for i, flag in enumerate(ok):
-        if flag and start is None:
-            start = i
-        elif not flag and start is not None:
-            runs.append((x[start], x[i - 1]))
-            start = None
-    if start is not None:
-        runs.append((x[start], x[-1]))
-    return runs
+    if "Nominal_Investment" in df.columns:
+        return df["Nominal_Investment"]
+    if _discount_rate(df) == 0.0 and "Discount_Rate" in df.columns:
+        return df["Investment_Cost"]
+    raise ValueError("run add_nominal_costs first; missing ['Nominal_Investment']")
 
 
 def _format_spend(dollars_per_year):
@@ -491,123 +536,425 @@ def _format_spend(dollars_per_year):
     return f"\\${dollars_per_year / 1e3:,.0f}k/yr"
 
 
-def plot_pareto_cost_curve(df, output_dir, selection="min_total_cost",
-                           band_tolerance=0.05, filename="pareto_cost_curve.png"):
-    """Plot nominal 100-year cost against nominal investment along the front.
+def _format_tolerance(tol):
+    return f"{tol * 100:g}%"
 
-    Investment, risk and their total are drawn against investment, with the
-    span of strategies whose total is within ``band_tolerance`` of the minimum
-    shaded. The minimum-total point (star) and the knee (diamond) are labelled
-    with their average annual spend: nominal investment over the horizon
-    divided by its length, which is the average cash budget the strategy needs.
 
-    "Minimum total cost" here is the lowest point of the plotted *nominal*
-    total. The package's ``min_total_cost`` selection rule minimises the
-    *present-value* total instead, and the two can be different strategies.
-    The configured rule's pick is marked "— selected"; if that is the PV
-    minimum and it is neither plotted point, it gets its own marker, so the
-    legend never calls a point selected when it was not.
+def _million_axis(axis, span_m):
+    """Ticks in whole $ millions where the range allows, never an offset."""
+    if span_m >= 3:
+        axis.set_major_locator(mticker.MaxNLocator(integer=True, steps=[1, 2, 2.5, 5, 10]))
+        axis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    else:
+        axis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:,.2g}"))
 
-    Args:
-        df: Front from add_nominal_costs.
-        output_dir: Directory for the PNG.
-        selection: The configured selection rule, "min_total_cost" or "knee".
-        band_tolerance: Shaded band width as a fraction of the minimum total.
-        filename: Output file name.
+
+# Call-out positions tried for each marker, nearest first: offset in points,
+# then horizontal and vertical alignment of the text against that offset.
+_CALLOUT_CANDIDATES = [
+    ((sx * d, sy * round(d * 0.8)), "left" if sx > 0 else "right", "bottom" if sy > 0 else "top")
+    for d in (14, 30, 50, 75, 105, 140)
+    for sx, sy in ((1, 1), (-1, 1), (1, -1), (-1, -1))
+]
+
+
+def _place_callouts(fig, ax, callouts, line_xy, marker_xy):
+    """Place each call-out where it overlaps no line, marker or other call-out.
+
+    Candidate positions are tried nearest first around the marker; the first
+    with no overlap and inside the axes wins. If none is clear, the one with
+    the fewest overlaps is kept. Positions further than the nearest ring get a
+    thin leader line back to the marker.
 
     Returns:
-        Dict with the output path, the index of the plotted minimum, the knee
-        and the selected strategy, the shaded runs ($M), and the legend labels.
+        One dict per call-out: the annotation, its display bbox and its
+        number of overlaps (0 when clear).
     """
-    required = {"Nominal_Investment", "Nominal_Risk", "Nominal_Total", "Avg_Annual_Spend"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"run add_nominal_costs first; missing {sorted(missing)}")
-    if "Ideal_Distance" not in df.columns:
-        df = annotate_front(df)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    to_display = ax.transData.transform
+    paths = [Path(to_display(np.column_stack([x, y]))) for x, y in line_xy]
+    pad = 3.0
+    marker_r = 9.0 * fig.dpi / 72.0
+    marker_boxes = [
+        Bbox.from_bounds(px - marker_r, py - marker_r, 2 * marker_r, 2 * marker_r)
+        for px, py in (to_display(xy) for xy in marker_xy)
+    ]
+    axes_box = ax.get_window_extent(renderer)
+    placed = []
+    for c in callouts:
+        best = None
+        for n, (offset, ha, va) in enumerate(_CALLOUT_CANDIDATES):
+            leader = None
+            if n >= 4:
+                leader = dict(arrowstyle="-", color=c["color"], linewidth=0.8, alpha=0.7,
+                              shrinkA=0, shrinkB=6)
+            ann = ax.annotate(
+                c["text"], c["xy"], xytext=offset, textcoords="offset points",
+                ha=ha, va=va, fontsize=9, fontweight="bold", color=c["color"],
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="none", alpha=0.85),
+                arrowprops=leader, zorder=7,
+            )
+            ann.update_positions(renderer)  # else the extent ignores the offset
+            box = Text.get_window_extent(ann, renderer).padded(pad)
+            overlaps = sum(p.intersects_bbox(box, filled=False) for p in paths)
+            overlaps += sum(box.overlaps(m) for m in marker_boxes)
+            overlaps += sum(box.overlaps(p["bbox"]) for p in placed)
+            if not (axes_box.contains(box.x0, box.y0) and axes_box.contains(box.x1, box.y1)):
+                overlaps += 1
+            if best is None or overlaps < best["conflicts"]:
+                if best is not None:
+                    best["annotation"].remove()
+                best = {"annotation": ann, "bbox": box, "conflicts": overlaps, "text": c["text"]}
+            else:
+                ann.remove()
+            if overlaps == 0:
+                break
+        placed.append(best)
+    return placed
 
-    front = df.sort_values("Nominal_Investment")
-    x = front["Nominal_Investment"] / 1e6
-    risk = front["Nominal_Risk"] / 1e6
-    total = front["Nominal_Total"] / 1e6
 
-    min_idx = front["Nominal_Total"].idxmin()
-    knee_idx = select_strategy(df, "knee")
-    selected_idx = select_strategy(df, selection)
+def plot_optimization_curve(df, path, selection="min_total_cost",
+                            plateau_tolerance=DEFAULT_PLATEAU_TOLERANCE, basis="objective",
+                            years=SIMULATION_YEARS, window=MARGINAL_WINDOW):
+    """Report figure: horizon cost against investment along the Pareto front.
 
-    # Sized so the saved PNG (tight bbox, 200 dpi) is ~1766 x 1079 px.
-    fig, ax = plt.subplots(figsize=(10.4, 4.95))
+    Investment (dashed), risk (dashed) and their total (solid) are drawn
+    against investment, the front sorted by investment. A shaded band spans
+    the investment range of the plateau — the points whose total is within
+    ``plateau_tolerance`` of the minimum. The strategies picked by the three
+    selection rules are marked, each with a call-out giving its average spend
+    per year: nominal investment over the horizon divided by its length,
+    never the budget and never a present value.
+
+    Args:
+        df: Front from add_nominal_costs (objectives plus nominal columns).
+        path: Output PNG path.
+        selection: The configured rule; its strategy is flagged "— selected".
+        plateau_tolerance: Plateau width as a fraction of the minimum total.
+        basis: "objective" plots the objectives (present value at the run's
+            rate, or nominal if undiscounted); "nominal" plots the nominal
+            sums and applies the three rules to them. On a nominal chart the
+            selected strategy (chosen on the objectives) can differ from the
+            nominal pick of the same rule; it then gets its own hollow ring.
+        years: Horizon length.
+        window: Front points per slope window for max_marginal_return.
+
+    Returns:
+        Dict with the path, the rules' picks (front index) on this basis, the
+        selected index, the plateau index and range, the legend labels, the
+        axis labels and the call-outs with their overlap counts.
+    """
+    spend = _nominal_investment(df) / years
+    selected_idx = select_strategy(df, selection, window)
+    if basis == "nominal":
+        view, basis_text = nominal_view(df), "nominal"
+    elif basis == "objective":
+        view, basis_text = df, _basis_text(_discount_rate(df))
+    else:
+        raise ValueError(f"basis must be 'objective' or 'nominal', got {basis!r}")
+
+    picks = {m: select_strategy(view, m, window) for m in SELECTION_METHODS}
+    plateau = plateau_points(view, plateau_tolerance)
+    front = view.sort_values("Investment_Cost", kind="stable")
+    x = (front["Investment_Cost"] / 1e6).to_numpy()
+    risk = (front["Risk_Cost"] / 1e6).to_numpy()
+    total = (front["Total_Cost"] / 1e6).to_numpy()
+
+    fig, ax = plt.subplots(figsize=(9, 5.6))
+    span = float(x.max() - x.min()) or 1.0
+    p0, p1 = plateau["Investment_Cost"].min() / 1e6, plateau["Investment_Cost"].max() / 1e6
+    if p1 - p0 < 0.006 * span:  # one point: keep the band visible
+        p0, p1 = p0 - 0.003 * span, p1 + 0.003 * span
+    band = ax.axvspan(p0, p1, color="0.85", linewidth=0, zorder=0)
+    inv_line, = ax.plot(x, x, "--", color="tab:blue", alpha=0.6, linewidth=1.2, zorder=2)
+    risk_line, = ax.plot(x, risk, "--", color="tab:red", alpha=0.7, linewidth=1.2, zorder=2)
+    total_line, = ax.plot(x, total, "-", color="black", linewidth=2, zorder=3)
+
+    def at(idx):
+        return view.loc[idx, "Investment_Cost"] / 1e6, view.loc[idx, "Total_Cost"] / 1e6
+
+    handles = [band, inv_line, risk_line, total_line]
+    labels = [f"Total within {_format_tolerance(plateau_tolerance)} of minimum", "Investment", "Risk",
+              "Total (investment + risk)"]
+    marker_xy, groups = [], {}
+    for m in SELECTION_METHODS:
+        marker, colour, size, name = PICK_STYLES[m]
+        idx = picks[m]
+        flagged = m == selection and idx == selected_idx
+        handles.append(ax.scatter(*at(idx), marker=marker, c=colour, s=size, edgecolors="black",
+                                  linewidths=0.8, zorder=5))
+        labels.append(name + (" — selected" if flagged else ""))
+        marker_xy.append(at(idx))
+        groups.setdefault(idx, []).append((name, colour))
+
+    if picks[selection] != selected_idx:
+        # Nominal chart only: the selected strategy is not this rule's nominal pick.
+        name, colour = PICK_STYLES[selection][3], PICK_STYLES[selection][1]
+        handles.append(ax.scatter(*at(selected_idx), marker="o", s=120, facecolors="white",
+                                  edgecolors=colour, linewidths=2.0, zorder=5))
+        labels.append(f"{name}, present value — selected")
+        marker_xy.append(at(selected_idx))
+        groups.setdefault(selected_idx, []).append((f"{name}, present value", colour))
+
+    title = f"Optimisation output: {years}-year cost against investment along the Pareto front"
+    xlabel = f"{years}-year investment, {basis_text} ($ million)"
+    ylabel = f"{years}-year cost, {basis_text} ($ million)"
+    ax.set_title(title, fontsize=12, loc="left")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    _million_axis(ax.xaxis, span)
+    _million_axis(ax.yaxis, float(max(total.max(), risk.max(), x.max())))
+    ax.grid(True, color="0.9")
+    ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    ax.grid(True, color="#e5e5e5", linewidth=0.9)
-    ax.set_axisbelow(True)
+    ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=3,
+              frameon=False, fontsize=9, handlelength=1.8, columnspacing=1.6)
+    ax.set_xlim(ax.get_xlim())
+    ax.set_ylim(ax.get_ylim())
+    fig.tight_layout()
 
-    runs = _within_tolerance_runs(x.to_numpy(), total.to_numpy(), band_tolerance)
-    span = float(x.max() - x.min()) or 1.0
-    band = None
-    for x0, x1 in runs:
-        if x1 - x0 < 0.004 * span:  # keep a one-point run visible
-            x0, x1 = x0 - 0.002 * span, x1 + 0.002 * span
-        band = ax.axvspan(x0, x1, color="#d9d9d9", linewidth=0, zorder=0)
+    # One call-out per marked strategy; rules that pick the same strategy share it.
+    callouts = []
+    for idx, members in groups.items():
+        names = " = ".join(n for n, _ in members)
+        callouts.append({"xy": at(idx), "color": members[0][1],
+                         "text": f"{names}\n{_format_spend(spend[idx])} average spend"})
+    placed = _place_callouts(fig, ax, callouts,
+                             [(x, x), (x, risk), (x, total)], marker_xy)
 
-    inv_line, = ax.plot(x, x, "--", color="tab:blue", alpha=0.6, linewidth=1.6, zorder=2)
-    risk_line, = ax.plot(x, risk, "--", color="tab:red", alpha=0.75, linewidth=1.6, zorder=2)
-    total_line, = ax.plot(x, total, "-", color="black", linewidth=2.3, zorder=3)
-
-    def point(idx):
-        row = front.loc[idx]
-        return row["Nominal_Investment"] / 1e6, row["Nominal_Total"] / 1e6, row["Avg_Annual_Spend"]
-
-    def suffix(idx):
-        return " — selected" if idx == selected_idx else ""
-
-    mx, my, mspend = point(min_idx)
-    kx, ky, kspend = point(knee_idx)
-    star = ax.scatter([mx], [my], marker="*", s=380, color="tab:red",
-                      edgecolors="black", linewidths=0.8, zorder=5)
-    diamond = ax.scatter([kx], [ky], marker="D", s=160, color="tab:blue",
-                         edgecolors="black", linewidths=0.8, zorder=6)
-
-    text_style = dict(textcoords="offset points", fontweight="bold", fontsize=10.5,
-                      va="bottom", annotation_clip=False)
-    knee_offset, knee_ha = ((22, 26), "left") if knee_idx != min_idx else ((-22, 26), "right")
-    ax.annotate(f"Knee (balanced)\n{_format_spend(kspend)} average spend", (kx, ky),
-                xytext=knee_offset, ha=knee_ha, color="tab:blue", **text_style)
-    ax.annotate(f"Minimum total cost\n{_format_spend(mspend)} average spend", (mx, my),
-                xytext=(14, 22), ha="left", color="tab:red",
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                          edgecolor="none", alpha=0.85), **text_style)
-
-    handles = [band, inv_line, risk_line, total_line, star, diamond]
-    labels = [f"Total within {band_tolerance:.0%} of minimum", "Investment", "Risk",
-              "Total (investment + risk)", "Minimum total cost" + suffix(min_idx),
-              "Knee (balanced)" + suffix(knee_idx)]
-
-    if selected_idx not in (min_idx, knee_idx):
-        sx, sy, sspend = point(selected_idx)
-        picked = ax.scatter([sx], [sy], marker="o", s=120, facecolors="white",
-                            edgecolors="tab:red", linewidths=2.0, zorder=5)
-        ax.annotate(f"Lowest present-value cost\n{_format_spend(sspend)} average spend",
-                    (sx, sy), xytext=(14, -14), ha="left", color="tab:red",
-                    **{**text_style, "va": "top"})
-        handles.append(picked)
-        labels.append("Lowest present-value cost — selected")
-
-    ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.13), ncol=3,
-              frameon=False, fontsize=10, handlelength=2.2, columnspacing=2.5)
-
-    years = SIMULATION_YEARS
-    ax.set_title(f"Optimisation output: {years}-year cost against investment along the Pareto front",
-                 loc="left", fontsize=13)
-    ax.set_xlabel(f"{years}-year investment, nominal (\\$ million)", fontsize=11)
-    ax.set_ylabel(f"{years}-year cost, nominal (\\$ million)", fontsize=11)
-
-    path = os.path.join(output_dir, filename)
     fig.savefig(path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    print(f"Pareto cost curve saved to {path}")
-    return {"path": path, "min_index": min_idx, "knee_index": knee_idx,
-            "selected_index": selected_idx, "band_runs": runs, "legend_labels": labels}
+    print(f"Chart saved to {path}")
+    return {
+        "path": path, "basis": basis_text, "picks": picks, "selected_index": selected_idx,
+        "plateau_index": list(plateau.index),
+        "plateau_range": (plateau["Investment_Cost"].min(), plateau["Investment_Cost"].max()),
+        "legend_labels": labels, "title": title, "xlabel": xlabel, "ylabel": ylabel,
+        "callouts": [{"text": p["text"], "conflicts": p["conflicts"]} for p in placed],
+        "callout_conflicts": sum(p["conflicts"] for p in placed),
+    }
+
+
+def plot_pareto_cost_curve(df, output_dir, selection="min_total_cost",
+                           band_tolerance=DEFAULT_PLATEAU_TOLERANCE,
+                           filename="pareto_cost_curve.png", window=MARGINAL_WINDOW):
+    """The report figure on a nominal basis (undiscounted constant dollars).
+
+    Same layout as optimization_curve.png; the plateau and the three rules are
+    applied to the nominal sums. See plot_optimization_curve.
+    """
+    return plot_optimization_curve(df, os.path.join(output_dir, filename), selection=selection,
+                                   plateau_tolerance=band_tolerance, basis="nominal",
+                                   window=window)
+
+
+def plot_pareto_front(df, output_dir, filename="pareto_front.png"):
+    """Plot the Pareto front itself: risk against investment, with the picks.
+
+    The front is drawn in order of investment so it reads as a trade-off curve,
+    coloured by total cost. The three rules' strategies and the ideal point
+    are marked, with a dashed line from the ideal point to the knee so
+    "closest to ideal" is visible rather than asserted. Axes are present
+    values at the run's rate.
+    """
+    if "Ideal_Distance" not in df.columns:
+        df = annotate_front(df)
+    basis = _basis_text(_discount_rate(df))
+    front = df.sort_values("Investment_Cost")
+    inv_m, risk_m = front["Investment_Cost"] / 1e6, front["Risk_Cost"] / 1e6
+
+    fig, ax = plt.subplots(figsize=(11, 8))
+    ax.plot(inv_m, risk_m, "-", color="0.55", linewidth=1, alpha=0.8, zorder=1)
+    scatter = ax.scatter(
+        inv_m, risk_m, c=front["Total_Cost"] / 1e6, cmap="viridis",
+        s=42, alpha=0.9, zorder=2, edgecolors="white", linewidths=0.5,
+    )
+    fig.colorbar(scatter, ax=ax, label=f"Total cost, {basis} (\\$M)")
+
+    ideal = (df["Investment_Cost"].min() / 1e6, df["Risk_Cost"].min() / 1e6)
+    ax.plot(*ideal, "x", color="0.3", markersize=9, markeredgewidth=1.5, zorder=3)
+    ax.annotate("ideal point", ideal, xytext=(8, -14), textcoords="offset points",
+                fontsize=8, color="0.3")
+
+    offsets = {"min_total_cost": (12, 12), "knee": (-46, 10), "max_marginal_return": (12, -16)}
+    for method in SELECTION_METHODS:
+        marker, colour, size, _ = PICK_STYLES[method]
+        row = df.loc[select_strategy(df, method)]
+        x, y = row["Investment_Cost"] / 1e6, row["Risk_Cost"] / 1e6
+        ax.scatter([x], [y], marker=marker, s=size * 1.05, color=colour,
+                   edgecolors="black", linewidths=0.8, zorder=4,
+                   # Dollar signs are escaped: matplotlib otherwise reads them
+                   # as mathtext delimiters and italicises the text between.
+                   label=(f"{method}: budget \\${row['Budget']/1e6:.2f}M/yr, "
+                          f"trigger {row['Rehab_Trigger']:.2f}, "
+                          f"total \\${row['Total_Cost']/1e6:.1f}M"))
+        ax.annotate(method, (x, y), xytext=offsets[method], textcoords="offset points",
+                    fontsize=9, color=colour, fontweight="bold")
+        if method == "knee":
+            ax.plot([ideal[0], x], [ideal[1], y], "--", color="tab:blue",
+                    linewidth=1, alpha=0.6, zorder=3)
+
+    ax.set_xlabel(f"Investment cost, {basis} (\\$M)")
+    ax.set_ylabel(f"Risk cost, {basis} (\\$M)")
+    ax.set_title("Pareto front: investment vs risk, with strategy picks")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.95)
+
+    path = os.path.join(output_dir, filename)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Pareto front saved to {path}")
+    return path
+
+
+def _range(series, fmt="{:.0f}"):
+    return f"{fmt.format(series.min())}-{fmt.format(series.max())}"
+
+
+def write_strategy_summary(df, path, selection="min_total_cost",
+                           plateau_tolerance=DEFAULT_PLATEAU_TOLERANCE,
+                           years=SIMULATION_YEARS, window=MARGINAL_WINDOW):
+    """One row per rule's strategy plus one for the plateau.
+
+    Holds what report text quotes so the figure can stay uncluttered.
+    ``basis`` says what the investment, risk and total columns are (present
+    value at the run's rate, or nominal); the nominal investment and the
+    average annual spend are always nominal. The risk avoided per dollar is
+    the windowed slope of the front (about 1 at the minimum-total point).
+
+    Returns:
+        The summary DataFrame, also written to ``path``.
+    """
+    rate = _discount_rate(df)
+    basis = _basis_text(rate, convention=True)
+    nominal_inv = _nominal_investment(df)
+    mr = marginal_return(df, window)
+    plateau = plateau_points(df, plateau_tolerance)
+    h = f"{years}yr"
+
+    def col(row, name):
+        return row[name] if name in row.index else np.nan
+
+    rows = []
+    for m in SELECTION_METHODS:
+        idx = select_strategy(df, m, window)
+        row = df.loc[idx]
+        rows.append({
+            "strategy": m, "selected": m == selection, "basis": basis,
+            "risk_avoided_per_dollar_invested": mr.get(idx, np.nan),
+            "annual_budget": row["Budget"], "rehab_trigger": row["Rehab_Trigger"],
+            f"investment_{h}": row["Investment_Cost"], f"risk_{h}": row["Risk_Cost"],
+            f"total_{h}": row["Total_Cost"],
+            f"investment_{h}_nominal": nominal_inv[idx],
+            "avg_annual_spend": nominal_inv[idx] / years,
+            f"failures_{h}": col(row, "Failures"),
+            f"emergency_replaced_pipes_{h}": col(row, "Emergency_Replaced_Pipes"),
+            "backlog_pipes": col(row, "Backlog_Pipes"),
+            "backlog_length_ft": col(row, "Backlog_Length"),
+        })
+    rows.append({
+        "strategy": f"plateau (total within {_format_tolerance(plateau_tolerance)} of minimum)",
+        "selected": False, "basis": basis,
+        "annual_budget": _range(plateau["Budget"]),
+        "rehab_trigger": _range(plateau["Rehab_Trigger"], "{:.2f}"),
+        f"investment_{h}": _range(plateau["Investment_Cost"]),
+        f"total_{h}": _range(plateau["Total_Cost"]),
+        f"investment_{h}_nominal": _range(nominal_inv[plateau.index]),
+        "avg_annual_spend": _range(nominal_inv[plateau.index] / years),
+        "n_front_points": len(plateau),
+    })
+    summary = pd.DataFrame(rows)
+    safe_write_file(path, summary.to_csv(index=False))
+    print(f"Strategy summary saved to {path}")
+    return summary
+
+
+def write_report_outputs(df, output_dir, selection="min_total_cost",
+                         plateau_tolerance=DEFAULT_PLATEAU_TOLERANCE, window=MARGINAL_WINDOW):
+    """Charts, strategy summary and console report for a front.
+
+    Writes optimization_curve.png (objective basis), pareto_cost_curve.png
+    (nominal), pareto_front.png (risk against investment) and
+    selected_strategies.csv. Used by a full run and by --plot-only.
+
+    Returns:
+        Dict with the picks, the selected index, the plateau, the summary and
+        the two cost-curve results from plot_optimization_curve.
+    """
+    picks = {m: select_strategy(df, m, window) for m in SELECTION_METHODS}
+    plateau = plateau_points(df, plateau_tolerance)
+    basis = _basis_text(_discount_rate(df))
+    spend = _nominal_investment(df) / SIMULATION_YEARS
+
+    print(f"Selection rule: {selection}")
+    for m, idx in picks.items():
+        row = df.loc[idx]
+        tag = " (selected)" if m == selection else ""
+        print(f"  {m + tag:<32} budget ${row['Budget']:>11,.0f}/yr  trigger {row['Rehab_Trigger']:.2f}  "
+              f"total ${row['Total_Cost'] / 1e6:,.2f}M ({basis})  "
+              f"average spend ${spend[idx]:,.0f}/yr")
+    print(f"Plateau (total within {_format_tolerance(plateau_tolerance)} of minimum): "
+          f"{len(plateau)} front points, budgets ${plateau['Budget'].min():,.0f}-"
+          f"${plateau['Budget'].max():,.0f}/yr, investment ${plateau['Investment_Cost'].min():,.0f}-"
+          f"${plateau['Investment_Cost'].max():,.0f} ({basis})")
+    best = df.loc[picks[selection]]
+    if "Backlog_Pipes" in df.columns and best["Backlog_Pipes"] > 0:
+        print(f"Inherited backlog (reported, not optimised): {best['Backlog_Pipes']:.0f} pipes, "
+              f"{best['Backlog_Length']:,.0f} ft at condition <= {BACKLOG_CONDITION:g} in year 1")
+
+    curve = plot_optimization_curve(df, os.path.join(output_dir, "optimization_curve.png"),
+                                    selection, plateau_tolerance, window=window)
+    nominal = plot_pareto_cost_curve(df, output_dir, selection, plateau_tolerance, window=window)
+    plot_pareto_front(df, output_dir)
+    summary = write_strategy_summary(df, os.path.join(output_dir, "selected_strategies.csv"),
+                                     selection, plateau_tolerance, window=window)
+    return {"picks": picks, "selected_index": picks[selection], "plateau": plateau,
+            "summary": summary, "curve": curve, "nominal_curve": nominal}
+
+
+def replot():
+    """Redraw the charts and summary from the saved front without re-optimising.
+
+    Reads nsga2_results.csv from the output directory and applies the config's
+    current ``selection`` and ``plateau_tolerance``. A front saved before the
+    nominal and count columns existed is re-simulated once (exact with the
+    configured seed) and saved back with them. The action plan, cost summary,
+    diagnostics and validation curve need a full run and are not touched.
+    """
+    print("=== LEYP Optimizer: redraw from the saved front ===")
+    config = load_config()
+    method, plateau_tol = selection_settings(config)
+    output_dir = config["output_base_dir"]
+    results_path = os.path.join(output_dir, "nsga2_results.csv")
+    if not os.path.exists(results_path):
+        raise FileNotFoundError(f"{results_path} not found; run a full optimisation first")
+    df = pd.read_csv(results_path)
+
+    missing = [c for c in REEVALUATION_COLUMNS + ("Discount_Rate",) if c not in df.columns]
+    if missing:
+        if (config.get("simulation") or {}).get("seed") is None:
+            raise ValueError(f"{results_path} lacks {missing} and simulation.seed is unset, so the "
+                             "front cannot be re-simulated exactly; run a full optimisation")
+        print(f"Saved front lacks {missing}; re-simulating its {len(df)} strategies...")
+        if not os.path.exists(OPTIMIZED_INPUT_PATH):
+            preprocess_network(input_path=config["master_input_file"], output_path=OPTIMIZED_INPUT_PATH,
+                               skip_segmentation=config.get("skip_segmentation", False))
+        df = add_nominal_costs(df, config, OPTIMIZED_INPUT_PATH)
+        error = df.attrs["pv_reproduction_error"]
+        if error > 1.0:
+            raise RuntimeError(
+                f"Re-simulation differs from the saved objectives by up to ${error:,.0f}: the saved "
+                "front came from a different model or configuration. Run a full optimisation.")
+        safe_write_file(results_path, df.to_csv(index=False))
+        print(f"  Reproduced the saved objectives exactly; added the columns to {results_path}")
+
+    report = write_report_outputs(df, output_dir, method, plateau_tol)
+    print("Optimal_Action_Plan.csv, cost_summary.csv, simulation_diagnostics.csv and the validation "
+          "curve were not regenerated: they describe the strategy chosen by the last full run. "
+          "Run a full optimisation if `selection` has changed since.")
+    return report
 
 
 def _parse_args(argv=None):
@@ -615,15 +962,25 @@ def _parse_args(argv=None):
         description="LEYP-Water NSGA-II optimizer: search budget and trigger, then write the "
                     "Pareto front, action plan, validation curve and charts."
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--cost-curve-only", action="store_true",
-        help="Run the search and write only the Pareto cost curve "
+        help="Run the search and write only the nominal Pareto cost curve "
              "(pareto_cost_curve.png and pareto_cost_curve_data.csv). Skips the action plan, "
              "validation curve and other outputs; existing files are left as they were.",
+    )
+    mode.add_argument(
+        "--plot-only", action="store_true",
+        help="No search: redraw optimization_curve.png, pareto_cost_curve.png, pareto_front.png "
+             "and selected_strategies.csv from the saved nsga2_results.csv with the config's "
+             "current selection and plateau_tolerance. The action plan is not regenerated.",
     )
     return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    run_optimization(cost_curve_only=args.cost_curve_only)
+    if args.plot_only:
+        replot()
+    else:
+        run_optimization(cost_curve_only=args.cost_curve_only)
