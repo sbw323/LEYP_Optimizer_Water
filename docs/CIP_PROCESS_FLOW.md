@@ -90,11 +90,13 @@ flowchart TD
         SEL{"Selection rule<br/>optimizer_config.yaml"}
         MIN["min_total_cost · default<br/>lowest PV investment + risk<br/>the economic optimum"]
         KNEE["knee<br/>closest to the normalised ideal point"]
-        OUT[/"Optimal_Action_Plan.csv · cost_summary.csv<br/>simulation_diagnostics.csv — includes the per-year counts<br/>optimization_curve.png · validation_curve.png"/]
+        MMR["max_marginal_return<br/>steepest stretch of the front<br/>most risk avoided per extra dollar"]
+        OUT[/"Optimal_Action_Plan.csv · cost_summary.csv<br/>simulation_diagnostics.csv — includes the per-year counts<br/>optimization_curve.png · selected_strategies.csv<br/>pareto_cost_curve.png · pareto_front.png · validation_curve.png"/]
         OBJ --> GEN
         GEN -->|yes| FRONT --> SEL
         SEL --> MIN --> OUT
         SEL --> KNEE --> OUT
+        SEL --> MMR --> OUT
     end
     YEAR -->|yes| OBJ
     GEN -->|"no · evolve the next candidates"| GENES
@@ -106,7 +108,7 @@ flowchart TD
     classDef gap fill:#f3f3f3,stroke:#9a9a9a,stroke-dasharray:6 4,color:#6a6a6a
     class INV,COND,HIST,TTF,RANK,CIP,UNF,DEF,DEG,ATF,HAZ,REP,EMR,OK model
     class ELIG,BIG,FIT,FLOOR,BRK,SEG,YEAR,GEN,SEL decision
-    class GENES,OBJ,FRONT,MIN,KNEE opt
+    class GENES,OBJ,FRONT,MIN,KNEE,MMR opt
     class OUT out
     class RVP,WATCH gap
 ```
@@ -143,7 +145,8 @@ capital program can schedule.
 | Hazard, including wear-out | `Pipe.calculate_hazard`, `Pipe.wearout_multiplier` |
 | Breaks, repair cost, condition damage, segment failure | `Pipe.simulate_year`, `VirtualSegment.simulate_breaks` |
 | Emergency replacement | `leyp_runner._simulate_once`, `_emergency_replace` |
-| Scoring, Pareto front, selection | `leyp_optimizer.Water_LEYP_Problem`, `annotate_front`, `select_strategy` |
+| Scoring, Pareto front, selection | `leyp_optimizer.Water_LEYP_Problem`, `annotate_front`, `select_strategy`, `marginal_return`, `plateau_points` |
+| Report figure, strategy summary, redraw | `leyp_optimizer.plot_optimization_curve`, `write_strategy_summary`, `write_report_outputs`, `replot` |
 
 ## Not modelled
 

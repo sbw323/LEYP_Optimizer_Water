@@ -52,7 +52,8 @@ average $663/ft against the network's $736/ft.
 | Annuity factor, 3% / 100 yr (*derived*) | 31.60 | PV ÷ 31.60 = level annual equivalent. Not PV ÷ 100 |
 | Budget gene | $10,000 – $2,000,000 per yr | Searched by NSGA-II |
 | Rehab-trigger gene | 1.0 – 3.5 | Condition at or below which a pipe is eligible for **replacement** (not rehab) |
-| `selection` | **knee** (current config) | `min_total_cost` if unset |
+| `selection` | **knee** (current config) | `min_total_cost` if unset; or `max_marginal_return`. See section 9 |
+| `plateau_tolerance` | 5% | Width of the plateau of near-minimum strategies. See section 9 |
 | `simulation.n_replicates` | 8 | Each strategy's score is the mean of 8 stochastic runs |
 | `simulation.seed` | 20260830 | Same draws for every candidate (common random numbers) |
 | Search size | 32 population, 16 offspring, 30 generations, seed 895 | About 512 evaluations |
@@ -202,3 +203,31 @@ same to replace or repair as a CoF-1 pipe.
   (`OPEN_ITEMS.md` DEC-2). Repairs are under 1% of risk cost at $5,000 a break (MOD-2).
 - **No rehab or lining option exists**; every planned intervention is a full replacement
   (`docs/CIP_PROCESS_FLOW.md`).
+
+---
+
+## 9. Optimizer outputs — selection rules, plateau and reporting
+
+Output work only: none of this changes the objectives, the physics or the search. The same
+seeds give the same front, and the same rule picks the same strategy.
+
+| Rule (`selection`) | Picks | Reading |
+|---|---|---|
+| `min_total_cost` | Lowest investment + risk | Where the front's slope is −1: a dollar invested avoids a dollar of risk |
+| `knee` | Closest to the ideal point after min–max normalising both objectives | Best-balanced trade-off |
+| `max_marginal_return` | Steepest stretch of the front: most risk avoided per extra dollar, slope over a sliding 5-point window, assigned to the window's centre | Best value per dollar; usually low investment, high remaining risk. Not a spend level |
+
+| Term | Definition |
+|---|---|
+| Plateau | Front strategies with total within `plateau_tolerance` (5%) of the minimum total. Interchangeable to within the tolerance; shaded on the charts, summarised as a row of `selected_strategies.csv` |
+| Basis of the objectives | Present value at `discount_rate` (3% real, end-of-year); the chart axes and `selected_strategies.csv` state the rate the run used. A run with rate 0 is labelled "nominal" |
+| Average annual spend | Nominal 100-year investment ÷ 100. Always nominal; never the budget gene, never a present value |
+| Nominal sums | Each front strategy is re-simulated with the optimizer's seed and replicate count, which reproduces its present values exactly, and the undiscounted investment and risk are kept beside them |
+| Risk avoided per dollar invested | The windowed slope of the front at a strategy; ≈ 1 at the minimum total, largest at `max_marginal_return` |
+| Inherited backlog | Pipes at condition ≤ `BACKLOG_CONDITION` in year 1 and their length. A property of the inventory, the same for every strategy; reported, not optimised |
+
+`selection` decides which strategy drives `Optimal_Action_Plan.csv` and which is flagged
+"— selected"; all three are always marked and summarised. `--plot-only` re-applies the
+current `selection` and `plateau_tolerance` to the saved front without re-optimising, and
+does not rewrite the action plan.
+

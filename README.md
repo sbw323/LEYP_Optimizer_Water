@@ -181,12 +181,17 @@ The simulation is stochastic. `run_simulation(seed=...)` seeds the stream before
 
 ### Strategy Selection
 
-One strategy is chosen from the front for the action plan, via `selection:`:
+Three rules each pick one strategy from the front. `selection:` in `optimizer_config.yaml` chooses which one drives the action plan; all three are always marked on the charts and summarised in `selected_strategies.csv`.
 
-- `min_total_cost` (default) — lowest investment + risk. Both objectives are dollars, so this is a real quantity rather than an arbitrary weighting.
-- `knee` — closest to the ideal point once both objectives are normalized; the best-balanced trade-off.
+- `min_total_cost` (default) — lowest investment + risk: the point where the front's slope is −1, so a dollar invested avoids a dollar of risk. Both objectives are dollars, so this is a real quantity rather than an arbitrary weighting.
+- `knee` — closest to the ideal point (least investment, least risk) after min–max normalising both objectives; the best-balanced trade-off.
+- `max_marginal_return` — the steepest stretch of the front, where each additional dollar invested avoids the most risk. Single segments of an NSGA-II front are noisy, so the slope is measured over a sliding window of five neighbouring points and the strategy is the window's centre. It is a best-value-per-dollar point, usually at low investment with high remaining risk — not a recommended spend level.
 
-The run prints what the other rule would have chosen, and warns if the selected budget sits at the gene ceiling, since the optimum may lie above it. `nsga2_results.csv` carries `Norm_Investment`, `Norm_Risk`, and `Ideal_Distance` so the trade-off stays visible.
+**The plateau** is the set of front strategies whose total is within `plateau_tolerance` (default 5%) of the minimum total. Total cost is flat near the optimum, so the plateau, not the single minimum, is the honest answer to "what budget": strategies inside it are interchangeable to within the tolerance.
+
+**Present value and nominal.** The objectives, and so every rule, the plateau and the axes of `optimization_curve.png`, are present values at `discount_rate` (3% real, end-of-year). Average annual spend is always **nominal**: a strategy's undiscounted 100-year investment ÷ 100 — never the budget gene and never a present value. `nsga2_results.csv` holds the nominal sums beside the present values; they come from re-simulating each front strategy with the optimizer's seed, which reproduces its objectives exactly.
+
+The run prints the three picks, the selected rule, the plateau (point count, budget range, investment range) and the inherited backlog, and warns if the selected budget sits at the gene ceiling, since the optimum may lie above it. `nsga2_results.csv` also carries `Norm_Investment`, `Norm_Risk` and `Ideal_Distance`.
 
 ---
 
@@ -199,30 +204,35 @@ pip install pytest        # to run the test suite
 
 ```bash
 python leyp_optimizer.py                      # full optimization + reports
-python leyp_optimizer.py --cost-curve-only    # search, then write only the Pareto cost curve
+python leyp_optimizer.py --cost-curve-only    # search, then write only the nominal cost curve
+python leyp_optimizer.py --plot-only          # no search: redraw charts + summary from the saved front
 python leyp_runner.py --output-dir results \
     --budget 1000000 --trigger 1.5 \
     --seed 20260830 --replicates 5            # single strategy
-pytest                                        # 140 tests
+pytest                                        # 205 tests
 ```
 
 ### Key Output Files
 
 | File | Description |
 |---|---|
-| `nsga2_results.csv` | Pareto front: present-value objectives, genes, total cost, normalized position, distance to ideal, and the nominal (undiscounted) investment, risk, total and average annual spend of each strategy |
+| `nsga2_results.csv` | Pareto front: present-value objectives, genes, total cost, normalized position, distance to ideal, the discount rate, and each strategy's nominal investment, risk, total and average annual spend, breaks, emergency-replaced pipes and inherited backlog |
+| `optimization_curve.png` | **Report figure.** 100-year investment, risk and total against investment along the front (present value at the run's rate), the plateau shaded, and the three rules' strategies marked with their nominal average annual spend; the selected one flagged in the legend |
+| `selected_strategies.csv` | One row per rule's strategy plus one for the plateau: selected flag, basis, budget, trigger, 100-year investment / risk / total, nominal investment, average annual spend, breaks, emergency-replaced pipes, inherited backlog, and risk avoided per dollar invested (≈ 1 at the minimum total); the plateau row gives its budget, trigger, investment, total and spend ranges and point count |
+| `pareto_cost_curve.png` | The report figure on a nominal (undiscounted) basis, with the rules and plateau applied to nominal costs |
+| `pareto_front.png` | The front itself: risk against investment, coloured by total, with the ideal point and the three picks |
 | `Optimal_Action_Plan.csv` | Year-by-year schedule for the selected strategy |
 | `cost_summary.csv` | Present values, undiscounted totals, and plan health metrics |
 | `simulation_diagnostics.csv` | Per-year CIP/emergency/break activity, budget utilization, discount factors, `Pipes_At_Floor`, `Floor_Pipes_Below_Onset` |
-| `optimization_curve.png` | Investment vs. risk cost with the Pareto front |
-| `pareto_cost_curve.png` | Nominal 100-year investment, risk and total cost along the front, the span within 5% of the minimum total, and the minimum-total and knee strategies with their average annual spend |
 | `pareto_cost_curve_data.csv` | `--cost-curve-only` runs only: the front behind `pareto_cost_curve.png` |
 | `validation_curve.png` | Three-panel validation |
 | `validation_data.csv` | Validation curve data with replicate spread |
 
+**`--plot-only`** redraws `optimization_curve.png`, `pareto_cost_curve.png`, `pareto_front.png` and `selected_strategies.csv` from the saved `nsga2_results.csv`, applying the config's current `selection` and `plateau_tolerance`, without re-optimising. It does not regenerate the action plan, cost summary, diagnostics or validation curve — those need a full run — and says so. A front saved before the nominal and count columns existed is re-simulated once (exact with the configured seed; refused if the re-simulation does not reproduce the saved objectives) and saved back with them.
+
 **`--cost-curve-only`** runs the same NSGA-II search and writes only `pareto_cost_curve.png` and `pareto_cost_curve_data.csv`. It skips the action plan, validation curve, `nsga2_results.csv` and the other charts, and leaves any of those already in the output directory as they were, so after a parameter change they will describe the earlier run.
 
-On `pareto_cost_curve.png`, "Minimum total cost" is the lowest point of the plotted *nominal* total. The `min_total_cost` selection rule minimises the *present-value* total, so the two can be different strategies; when the rule's pick is neither plotted point it is marked separately as "Lowest present-value cost — selected". Average annual spend is nominal investment ÷ 100 years, the average cash budget the strategy needs.
+On the nominal chart the three rules are applied to nominal costs, so its "Minimum total cost" is the lowest point of the nominal total. The configured rule picks on present values, so its strategy can differ from the same rule's nominal pick; it is then shown with its own hollow ring, labelled e.g. "Knee (balanced), present value — selected", so the legend never calls a point selected when it was not.
 
 `Optimal_Action_Plan.csv` records `Action` (`CIP_Replacement`, `Emergency_Replacement`, `Break_Event`), `Cause` for emergencies (always `break_failure` — the segment rule is the only route), `Life_Ratio` (age ÷ average life at the time of an emergency), `Backlog` marking the first replacement of an inherited-backlog pipe, `Priority` (the ranking value, captured before the pipe is reset), and `Annualized_Risk`.
 
@@ -296,7 +306,8 @@ simulation:
 validation:
   n_points: 15
 
-selection: min_total_cost   # or: knee
+selection: min_total_cost   # or: knee, max_marginal_return
+plateau_tolerance: 0.05
 
 algorithm:
   pop_size: 32
@@ -341,7 +352,7 @@ That ratio is noise-dominated at very small budgets: the two policies' stochasti
 ## Testing
 
 ```bash
-pytest                    # 140 tests
+pytest                    # 205 tests
 pytest tests/test_leyp_core.py -v
 ```
 
@@ -353,6 +364,7 @@ pytest tests/test_leyp_core.py -v
 | `test_initialization.py` | Seeding cap, LEYP history preservation, inherited-backlog reporting |
 | `test_calibration.py` | Feedback saturation, break-rate band, hazard stability, planning realism, discounting |
 | `test_optimizer.py` | Front annotation, selection rules, search sizing, config sanity |
+| `test_optimizer_report.py` | The three selection rules and the plateau on synthetic fronts, the report figure and strategy summary, `--cost-curve-only`, `--plot-only`, and that `selection` drives the action plan |
 | `test_validation.py` | Measured counts, distinct length axis, reported spread, sweep reach, baselines |
 
 ---
