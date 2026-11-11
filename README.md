@@ -113,15 +113,15 @@ Expected breaks per segment per year are `h(t) × segment_length / HAZARD_LENGTH
 
 `HAZARD_LENGTH_SCALE` is a pure units constant with no physical claim of its own, which makes it the right knob for the model's absolute break production. It is a **static parameter**; "calibration" refers to how its value was chosen, not to anything that happens at run time.
 
-It is derived against a **short untreated window**: the inventory as it stands, run with no CIP and no renewal for `CALIBRATION_WINDOW_YEARS` (10), matched to **0.287 breaks/mile/year**. A short window measures today's network, which is what a published break-rate statistic describes. The full 100-year do-nothing run is kept only as a **stability check** — it must stay finite and sit above the window rate — because under wear-out most of that run is spent with the whole network far past average life at the saturated multiplier, a state no real utility is in and no literature rate was measured on.
+It is set by the owner at **8,600**, twice the value derived against a **short untreated window** — the inventory as it stands, run with no CIP and no renewal for `CALIBRATION_WINDOW_YEARS` (10), matched to 0.287 breaks/mile/year (4,300). At 8,600 the window rate is **0.128 breaks/mile/year**. A short window measures today's network, which is what a published break-rate statistic describes. The full 100-year do-nothing run is kept only as a **stability check** — it must stay finite and sit above the window rate — because under wear-out most of that run is spent with the whole network far past average life at the saturated multiplier, a state no real utility is in and no literature rate was measured on.
 
 The derived value is tightly coupled to `WEAROUT_MAX_MULTIPLIER`: the inherited backlog is already past onset, so the window rate scales almost proportionally with the ceiling (0.11 / 0.26 / 0.60 at 5× / 10× / 20× with the scale held fixed). Only the combination is pinned by the break-rate target; separating them needs local break records broken down by pipe age.
 
-Anchor: Folkman (2018) national averages weighted by that network's material mix give 0.077 breaks/mile/year across all ages; an untreated network already 60% past design life and ageing a further century should sit several times above that. **Re-derive this constant if the inventory, material parameters, or `ALPHA` change.**
+Anchor: Folkman (2018) national averages weighted by that network's material mix give 0.077 breaks/mile/year across all ages; at 8,600 this network, already 60% past design life, sits about 1.7× above it. Expected breaks scale as 1 ÷ `HAZARD_LENGTH_SCALE`. **Revisit this constant if the inventory, material parameters, or `ALPHA` change.**
 
 ### Three-Cost-Stream Model
 
-1. **Investment Cost**: Planned CIP replacement (`$120/inch-ft` × diameter × length)
+1. **Investment Cost**: Planned CIP replacement (`$25/inch-ft` × diameter × length)
 2. **Emergency Repair Cost**: Point repairs for individual breaks (`$5,000`/break)
 3. **Emergency Replacement Cost**: Full replacement of failed pipes (`$5,000`/ft)
 
@@ -265,7 +265,7 @@ baseline = simulate("inventory.csv", no_intervention=True, seed=20260830)
 
 ```python
 DISCOUNT_RATE = 0.03                          # real, applied to both objectives
-CIP_REPLACEMENT_COST_PER_INCH_FT = 120.00
+CIP_REPLACEMENT_COST_PER_INCH_FT = 25.00
 EMERGENCY_REPAIR_COST_PER_BREAK = 5000.00
 EMERGENCY_REPLACEMENT_COST_PER_FT = 5000.00
 DEFAULT_REPLACEMENT_MATERIAL = "HDPE"
@@ -275,7 +275,7 @@ LEYP_BREAK_FEEDBACK_CAP = 10    # ceiling on feedback; without it the model dive
 COEFF_DIAMETER = -0.02
 N_SEGMENTS_PER_PIPE = 4
 SEGMENT_BREAK_THRESHOLD = 3     # breaks in ONE segment that condemn the pipe
-HAZARD_LENGTH_SCALE = 4300.0    # derived on a 10-yr untreated window; see Calibration
+HAZARD_LENGTH_SCALE = 8600.0    # owner-set (2x the 10-yr window derivation); see Calibration
 CALIBRATION_WINDOW_YEARS = 10
 
 # Wear-out (bathtub curve, age-related arm) — see Hazard & Break Simulation

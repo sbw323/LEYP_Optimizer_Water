@@ -1,7 +1,8 @@
 # LEYP-Water — Model Assumptions
 
-Every parameter that affects a computed cost, as set in the code at commit `d85921d`
-(`leyp_config.py`, `optimizer_config.yaml`). Values marked *derived* were computed by
+Every parameter that affects a computed cost, as set in the code on 2026-11-11, after the
+owner set `HAZARD_LENGTH_SCALE` = 8,600 and CIP = $25 per inch-ft (`leyp_config.py`,
+`optimizer_config.yaml`). Values marked *derived* were computed by
 running the model, not read from config. All dollars are **constant 2026 dollars**: the
 model has no inflation, and its 3% is a real discount rate.
 
@@ -11,7 +12,7 @@ model has no inflation, and its 3% is a real discount rate.
 
 | Parameter | Value | Applies to | Feeds |
 |---|---:|---|---|
-| `CIP_REPLACEMENT_COST_PER_INCH_FT` | **$120 per inch-diameter per ft** | Every planned replacement | Investment objective |
+| `CIP_REPLACEMENT_COST_PER_INCH_FT` | **$25 per inch-diameter per ft** | Every planned replacement | Investment objective |
 | `EMERGENCY_REPLACEMENT_COST_PER_FT` | **$5,000 per ft**, any diameter | Replacement after a segment fails | Risk objective, and the consequence term in ranking |
 | `EMERGENCY_REPAIR_COST_PER_BREAK` | **$5,000 per break** | Point repair on every break (demand maintenance) | Risk objective |
 | `DEFAULT_REPLACEMENT_MATERIAL` | HDPE | Every replacement, planned or emergency | Future hazard of renewed pipe |
@@ -20,25 +21,29 @@ model has no inflation, and its 3% is a real discount rate.
 
 | Diameter | Pipes | Miles | CIP $/ft | Emergency $/ft | Emergency premium |
 |---:|---:|---:|---:|---:|---:|
-| 1.5 in | 5 | 0.45 | $180 | $5,000 | 27.8× |
-| 2 in | 17 | 0.92 | $240 | $5,000 | 20.8× |
-| 3 in | 2 | 0.07 | $360 | $5,000 | 13.9× |
-| **6 in** | **321** | **17.45** | **$720** | **$5,000** | **6.9×** |
-| 8 in | 31 | 1.69 | $960 | $5,000 | 5.2× |
-| 10 in | 11 | 0.83 | $1,200 | $5,000 | 4.2× |
-| 12 in | 1 | 0.34 | $1,440 | $5,000 | 3.5× |
+| 1.5 in | 5 | 0.45 | $37.50 | $5,000 | 133× |
+| 2 in | 17 | 0.92 | $50 | $5,000 | 100× |
+| 3 in | 2 | 0.07 | $75 | $5,000 | 67× |
+| **6 in** | **321** | **17.45** | **$150** | **$5,000** | **33×** |
+| 8 in | 31 | 1.69 | $200 | $5,000 | 25× |
+| 10 in | 11 | 0.83 | $250 | $5,000 | 20× |
+| 12 in | 1 | 0.34 | $300 | $5,000 | 17× |
 
 | Network figure (*derived*) | Value |
 |---|---:|
-| Length-weighted CIP rate | $736 per ft |
-| Renew the whole network once by CIP | $84.4M |
+| Length-weighted CIP rate | $153 per ft |
+| Renew the whole network once by CIP | $17.6M |
 | Renew the whole network once by emergency replacement | $574.0M |
 
 **Consequence for ranking.** Priority is risk reduction per dollar:
-`CoF × $5,000 ÷ remaining life ÷ ($120 × diameter)`. Length cancels, and because the
+`CoF × $5,000 ÷ remaining life ÷ ($25 × diameter)`. Length cancels, and because the
 emergency rate is flat while CIP cost rises with diameter, **priority is proportional to
-1 ÷ diameter**. Small mains are strongly favoured, which is why the pipes the plan replaces
-average $663/ft against the network's $736/ft.
+1 ÷ diameter**. Small mains are favoured: the pipes the committed knee plan replaces average
+$150/ft against the network's $153/ft. The CIP rate scales every priority equally, so it
+does not change the ranking.
+
+An emergency premium of 17–133× is far above the 2–5× typical of utility practice (it was
+3.5–28× at the earlier $120 per inch-ft), so planned renewal is strongly favoured.
 
 ---
 
@@ -66,25 +71,25 @@ average $663/ft against the network's $736/ft.
 
 | Parameter | Value |
 |---|---:|
-| `HAZARD_LENGTH_SCALE` | **4,300** |
+| `HAZARD_LENGTH_SCALE` | **8,600**, set by the owner: twice the 4,300 derived below |
 | Calibration scenario | Louisa inventory as it stands, no CIP, no renewal, `CALIBRATION_WINDOW_YEARS` = **10** |
-| Target network rate | **0.287 breaks / mile / yr** |
-| Achieved (8 replicates, *derived*) | 0.285 breaks / mile / yr |
+| Derivation target (gave 4,300) | 0.287 breaks / mile / yr |
+| Achieved at 8,600 (8 replicates, *derived*) | **0.128 breaks / mile / yr** |
 | Anchor behind the target | National averages weighted by this material mix, 0.077 / mile / yr, scaled up for an ageing network — verify against the source before citing |
 
-Expected breaks per mile-year for a pipe = `hazard × 5,280 ÷ 4,300` = `1.228 × hazard`.
+Expected breaks per mile-year for a pipe = `hazard × 5,280 ÷ 8,600` = `0.614 × hazard`.
 
 ### Today's network, by material (*derived*, 10-year untreated window, 8 replicates)
 
 | Material | Pipes | Miles | Length-weighted age | × average life | Breaks / mi / yr | Share of length | Share of breaks |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| GI | 19 | 1.11 | 77 yr | **1.55** | **2.725** | 5% | **49%** |
-| AC | 84 | 4.57 | 76 yr | **1.27** | **0.602** | 21% | **44%** |
-| CI | 37 | 1.04 | 92 yr | 1.23 | 0.289 | 5% | 5% |
-| DI | 209 | 12.00 | 43 yr | 0.43 | 0.008 | 55% | 2% |
-| PVC | 36 | 2.87 | 60 yr | 0.50 | 0.009 | 13% | 0% |
-| Default | 3 | 0.16 | 80 yr | 0.94 | 0.000 | 1% | 0% |
-| **Network** | **388** | **21.74** | | | **0.285** | 100% | 100% |
+| GI | 19 | 1.11 | 77 yr | **1.55** | **1.210** | 5% | **48%** |
+| AC | 84 | 4.57 | 76 yr | **1.27** | **0.274** | 21% | **45%** |
+| CI | 37 | 1.04 | 92 yr | 1.23 | 0.096 | 5% | 4% |
+| DI | 209 | 12.00 | 43 yr | 0.43 | 0.004 | 55% | 2% |
+| PVC | 36 | 2.87 | 60 yr | 0.50 | 0.009 | 13% | 1% |
+| Default | 3 | 0.16 | 80 yr | 0.94 | 0.079 | 1% | 0% |
+| **Network** | **388** | **21.74** | | | **0.128** | 100% | 100% |
 
 GI and AC — 26% of the length, all past average life and therefore in wear-out — produce
 93% of the breaks.
@@ -95,13 +100,13 @@ GI and AC — 26% of the length, all past average life and therefore in wear-out
 
 | Material | Average life | 0.25× | 0.5× | 0.75× | 1.0× | 1.25× | 1.5× | 2.0× |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| GI | 50 yr | 0.020 | 0.046 | 0.075 | 0.106 | 0.628 | 1.150 | 2.133 |
-| AC | 60 yr | 0.014 | 0.027 | 0.041 | 0.054 | 0.309 | 0.546 | 0.956 |
-| CI | 75 yr | 0.011 | 0.020 | 0.027 | 0.034 | 0.184 | 0.314 | 0.520 |
-| DI | 100 yr | 0.010 | 0.014 | 0.017 | 0.019 | 0.097 | 0.157 | 0.238 |
-| PVC | 120 yr | 0.007 | 0.007 | 0.007 | 0.008 | 0.036 | 0.054 | 0.072 |
-| HDPE (replacement) | 150 yr | 0.005 | 0.005 | 0.005 | 0.005 | 0.025 | 0.036 | 0.048 |
-| Default | 85 yr | 0.011 | 0.014 | 0.015 | 0.017 | 0.081 | 0.126 | 0.180 |
+| GI | 50 yr | 0.010 | 0.023 | 0.037 | 0.053 | 0.314 | 0.575 | 1.067 |
+| AC | 60 yr | 0.007 | 0.014 | 0.020 | 0.027 | 0.155 | 0.273 | 0.478 |
+| CI | 75 yr | 0.006 | 0.010 | 0.013 | 0.017 | 0.092 | 0.157 | 0.260 |
+| DI | 100 yr | 0.005 | 0.007 | 0.008 | 0.010 | 0.049 | 0.078 | 0.119 |
+| PVC | 120 yr | 0.003 | 0.004 | 0.004 | 0.004 | 0.018 | 0.027 | 0.036 |
+| HDPE (replacement) | 150 yr | 0.003 | 0.003 | 0.003 | 0.003 | 0.012 | 0.018 | 0.024 |
+| Default | 85 yr | 0.005 | 0.007 | 0.008 | 0.008 | 0.040 | 0.063 | 0.090 |
 
 Breaks per mile per year. The jump between 1.0× and 1.25× is the wear-out term switching on.
 Prior breaks multiply these rates by up to 2.5× (section 5).
@@ -194,11 +199,11 @@ same to replace or repair as a CoF-1 pipe.
 ## 8. Limits to keep in view when citing these
 
 - **Only the network total break rate is calibrated.** The split between materials comes
-  from the parameters in sections 4–5, not from data, and the 4,300 scale is nearly
+  from the parameters in sections 4–5, not from data, and the scale (8,600) is nearly
   interchangeable with the wear-out ceiling (`OPEN_ITEMS.md` MOD-4). Louisa's own break
   records by material and age would pin both (DAT-1).
-- **The emergency rate is flat across diameters**, so the emergency premium runs from 3.5×
-  (12 in) to 27.8× (1.5 in). That is what drives the 1 ÷ diameter priority.
+- **The emergency rate is flat across diameters**, so the emergency premium runs from 17×
+  (12 in) to 133× (1.5 in). That is what drives the 1 ÷ diameter priority.
 - **The discount rate and both emergency costs are placeholders**, not Louisa's figures
   (`OPEN_ITEMS.md` DEC-2). Repairs are under 1% of risk cost at $5,000 a break (MOD-2).
 - **No rehab or lining option exists**; every planned intervention is a full replacement

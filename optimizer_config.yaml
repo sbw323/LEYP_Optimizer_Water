@@ -13,9 +13,9 @@ skip_segmentation: True
 genes:
   budget: 
     min: 10000
-    # Raised from 500000 to match the README. The old ceiling could not express
-    # a solvent policy: $500k/yr over the horizon is $50M against $84.4M to
-    # renew this network once (review finding B5).
+    # Raised from 500000 to match the README (review finding B5): at the
+    # original $120/inch-ft the network cost $84.4M to renew once, more than
+    # $500k/yr could fund over the horizon. At $25/inch-ft renewal is $17.6M.
     max: 2000000
   rehab_trigger: 
     min: 1.0

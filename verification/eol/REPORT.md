@@ -233,3 +233,10 @@ a Decision-5 choice, set out in the three options above, not further engineering
 
 Evidence files: `v5_optimizer.log`, `gates_v5.4-v6.2.txt`, `v5.4_plateau.txt`,
 `v5.4_above_ceiling.txt`, and the regenerated `Optimization_Results_NSGA2/`.
+
+---
+
+**Addendum (2026-11-11).** The owner has since set `HAZARD_LENGTH_SCALE` to **8,600**, twice
+the 4,300 derived in V3, and `CIP_REPLACEMENT_COST_PER_INCH_FT` to $25. The V3.3 pin now
+asserts 8,600; the 10-year window rate at that value is 0.128 breaks/mile/year. The rest of
+this report records what was verified at the time and is left as it was.

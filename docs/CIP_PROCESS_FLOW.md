@@ -30,7 +30,7 @@ flowchart TD
         RVP{{"Rehab · lining · preventive<br/>maintenance · or replace?"}}
         BIG{"Cost exceeds the<br/>whole annual budget?"}
         FIT{"Fits the remaining<br/>budget this year?"}
-        CIP["CIP replacement · $120 per inch-ft<br/>new HDPE · condition 6 · age 0"]
+        CIP["CIP replacement · $25 per inch-ft<br/>new HDPE · condition 6 · age 0"]
         UNF["Unfundable<br/>counted per year · not replaced"]
         DEF["Deferred<br/>counted per year · eligible again next year"]
         ELIG -->|yes| RANK

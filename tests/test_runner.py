@@ -337,12 +337,13 @@ def test_budget_is_deployed_when_work_is_available(tmp_path):
 
     Uses the real inventory, where renewal demand always exceeds the budget.
     A budget larger than the available work would idle legitimately, which is
-    not what this gate is about.
+    not what this gate is about. The budget is the original $399k scaled by
+    the CIP cost change ($120 -> $25 per inch-ft), so it buys the same pipe.
     """
     out = tmp_path / "r"
     run_simulation(
         override_input_path="Louisa_wConduits_Input_CSV.csv",
-        annual_budget=399046.84,
+        annual_budget=83_000.0,
         rehab_trigger=2.8,
         output_dir=str(out),
         generate_report=True,

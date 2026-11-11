@@ -211,8 +211,8 @@ the single weakest assumption in the model.
 
 ```
 current anchor   0.077 breaks/mi/yr  (Folkman 2018, weighted, all ages)
-calibrated to    0.287 breaks/mi/yr  (untreated, this network, 100 yr)
-knob             HAZARD_LENGTH_SCALE = 1500.0
+derived target   0.287 breaks/mi/yr  (untreated, this network, 10-yr window) -> 4,300
+current          0.128 breaks/mi/yr  at HAZARD_LENGTH_SCALE = 8,600 (owner-set, 2x derived)
 ```
 
 **Done when** the constant is re-derived against observed breaks per mile-year from
@@ -352,6 +352,9 @@ old pipes.
 window rate with scale fixed at 4,300:   Mmax 5 -> 0.112   10 -> 0.262   20 -> 0.603
 ```
 
+The scale is now owner-set at 8,600 rather than derived (2026-11-11), which halves every
+break rate; the degeneracy is unchanged.
+
 **Done when** local break records broken down by pipe age (see DAT-1) are used to fit the
 ceiling and the scale separately, or the degeneracy is recorded as an accepted
 limitation of the national-average anchor.
@@ -412,7 +415,8 @@ proposed:  tools/derive_hazard_scale.py --target 0.287 --window 10 --replicates 
 ```
 
 **Done when** the script exists, is referenced from the README calibration section, and
-reproduces the current 4,300 at the current parameters.
+reproduces the derived 4,300 at the current parameters. (The live value, 8,600, is set by
+the owner at twice the derivation; the tool would report the derived value beside it.)
 
 ### ENG-3 — Four unused symbols remain from earlier designs
 

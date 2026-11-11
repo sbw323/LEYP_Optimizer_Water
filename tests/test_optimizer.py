@@ -83,8 +83,9 @@ def test_search_is_large_enough_to_resolve_a_front(config):
 def test_budget_ceiling_can_express_a_solvent_policy(config):
     """The ceiling must allow renewing the network within the horizon.
 
-    At $120/inch-ft this network costs about $84.4M to renew once; a ceiling
-    of $500k/yr over 100 years could only fund $50M of that.
+    At $25/inch-ft this network costs about $17.6M to renew once. The check
+    keeps the $84.4M it cost at the original $120/inch-ft, so the ceiling
+    stays adequate if unit costs are raised again.
     """
     from leyp_config import SIMULATION_YEARS
 
@@ -129,6 +130,12 @@ def _configured_replicates():
 
 
 def _min_cost_budget(n_replicates=None):
+    """The lowest swept budget whose total is within 0.1% of the minimum.
+
+    Above the budget that funds all eligible work the total is flat (extra
+    budget goes unspent), so several budgets tie; taking the start of that
+    flat stretch keeps a tie from deciding the answer.
+    """
     n_replicates = n_replicates or _configured_replicates()
     from leyp_runner import simulate
 
@@ -137,7 +144,8 @@ def _min_cost_budget(n_replicates=None):
         r = simulate("Louisa_wConduits_Input_CSV.csv", annual_budget=b, rehab_trigger=1.5,
                      seed=20260830, n_replicates=n_replicates)
         totals[b] = r["investment_cost"] + r["risk_cost"]
-    return min(totals, key=totals.get)
+    floor = min(totals.values()) * 1.001
+    return min(b for b, t in totals.items() if t <= floor)
 
 
 def test_budget_optimum_is_interior():
@@ -146,16 +154,18 @@ def test_budget_optimum_is_interior():
     assert best not in (_SWEEP[0], _SWEEP[-1]), f"optimum at a bound: ${best:,}"
 
 
-def test_wearout_is_load_bearing_for_interior_optimum(monkeypatch):
-    """Without wear-out the optimum sits at a bound again.
+def test_wearout_raises_the_funded_optimum(monkeypatch):
+    """Wear-out is what makes a large capital programme worth funding.
 
-    Pins the finding that the age-related term is what gives the capital
-    programme a target worth funding: it concentrates risk in old pipes that
-    CIP can reach by risk-per-dollar. Remove it and risk is spread evenly, so
-    either buying everything always pays or nothing does.
+    It concentrates risk in old pipes that CIP can reach by risk-per-dollar,
+    so the cost-minimising budget is higher with it than without. (At $120
+    per inch-ft the optimum went to a bound without wear-out; at $25 CIP is
+    cheap enough that a small programme pays even then, so the finding is
+    now that wear-out raises the optimum, not that it creates one.)
     """
     import leyp_core
 
+    with_wearout = _min_cost_budget()
     monkeypatch.setattr(leyp_core, "WEAROUT_MAX_MULTIPLIER", 1.0)
-    best = _min_cost_budget()
-    assert best in (_SWEEP[0], _SWEEP[-1]), f"unexpected interior optimum without wear-out: ${best:,}"
+    without = _min_cost_budget()
+    assert with_wearout > without, f"wear-out ${with_wearout:,} vs none ${without:,}"

@@ -127,13 +127,18 @@ def window_rate():
 
 
 def test_calibration_window_rate_is_defensible(window_rate):
-    """HAZARD_LENGTH_SCALE is tuned on a short untreated window of the
-    inventory as it stands, which is what a published breaks/mile/year
-    statistic describes. Anchor: Folkman (2018) national averages weighted by
-    this material mix give 0.077 across all ages; a network already 60% past
-    design life should sit several times above that.
+    """The break rate over a short untreated window of the inventory as it
+    stands, which is what a published breaks/mile/year statistic describes.
+
+    HAZARD_LENGTH_SCALE is set by the owner at 8,600, twice the value derived
+    on this window against 0.287, giving about 0.13 (0.122 at the 5
+    replicates used here). Anchor: Folkman (2018)
+    national averages weighted by this material mix give 0.077 across all
+    ages; a network 60% past design life should sit above that, and 0.12 is
+    about 1.6x. The band keeps the rate above the national average and below
+    the old derivation target's neighbourhood.
     """
-    assert 0.15 <= window_rate <= 0.40, f"{window_rate:.3f} outside the target band"
+    assert 0.10 <= window_rate <= 0.40, f"{window_rate:.3f} outside the target band"
 
 
 def test_long_untreated_run_stays_finite(untreated, window_rate):
@@ -163,8 +168,8 @@ def test_intervention_reduces_breaks(untreated):
 
 
 def test_hazard_scale_is_the_calibrated_value():
-    """Pin the calibrated constant so a silent edit fails the suite."""
-    assert HAZARD_LENGTH_SCALE == 4300.0
+    """Pin the owner-set constant so a silent edit fails the suite."""
+    assert HAZARD_LENGTH_SCALE == 8600.0
 
 
 # --- Break-driven failure at adequate funding ----------------------------------

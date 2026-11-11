@@ -122,16 +122,17 @@ SEGMENT_BREAK_THRESHOLD = 3
 # units constant with no physical claim of its own, so it is the right knob to
 # calibrate the model's absolute break production against observed rates.
 #
-# Derived against a 10-year untreated window (CALIBRATION_WINDOW_YEARS) of the
-# Louisa inventory as it stands - no CIP, no renewal - matched to 0.287
-# breaks/mile/year.  Measured at this value: 0.285 over the window; the
-# 100-year do-nothing run reaches 0.926, finite and above the window as an
-# ageing network should be.  Anchor: Folkman (2018) national averages weighted
-# by this network's material mix give 0.077 across all ages; a network already
-# 60% past design life should sit several times above that.
+# Set by the owner at 8,600 (2026-11-11), twice the value derived on a 10-year
+# untreated window (CALIBRATION_WINDOW_YEARS) of the Louisa inventory as it
+# stands - no CIP, no renewal - against 0.287 breaks/mile/year (4,300,
+# 2026-11-02).  Measured at 8,600: 0.128 breaks/mile/year over the window
+# (8 replicates).  Anchor: Folkman (2018) national averages weighted by this
+# network's material mix give 0.077 across all ages, so the network sits
+# about 1.7x above it.
 #
-# Derived with WEAROUT_MAX_MULTIPLIER = 10.  Re-derive if the inventory, the
-# material parameters, ALPHA, or any wear-out constant changes.  (2026-11-02)
+# Expected breaks scale as 1 / HAZARD_LENGTH_SCALE.  The derivation assumed
+# WEAROUT_MAX_MULTIPLIER = 10; revisit if the inventory, the material
+# parameters, ALPHA, or any wear-out constant changes.
 HAZARD_LENGTH_SCALE = 8600.0
 SIMULATION_YEARS = 100
 
@@ -165,8 +166,10 @@ EMERGENCY_REPAIR_COST_PER_BREAK = 5000.00
 # Emergency replacement carries a premium over planned CIP work: mobilisation,
 # out-of-hours crews, service interruption, road reinstatement and the loss of
 # any opportunity to upsize or co-ordinate with other works.  At $5,000/ft
-# against CIP's $120/inch-ft this is roughly 6.9x for a 6-inch main and 3.5x
-# for a 12-inch one, in line with the 2-5x range typical of utility practice.
+# against CIP's $25/inch-ft this is roughly 33x for a 6-inch main and 17x
+# for a 12-inch one - well above the 2-5x range typical of utility practice
+# (it was 6.9x and 3.5x at the earlier $120/inch-ft), so planned renewal is
+# strongly favoured.
 # This rate is also the consequence term in ReplacementManager risk scoring;
 # because it enters both risk and cost uniformly it scales the objectives
 # without altering the replacement ranking.
