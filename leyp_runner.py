@@ -560,12 +560,14 @@ def action_plan_frame(actions: list) -> pd.DataFrame:
     """A replicate's action log as written to an action-plan CSV.
 
     Sorted by year (CIP actions are appended after the simulation loop and
-    land out of order), with the per-action optional columns filled.
+    land out of order), with the per-action optional columns filled. The sort
+    is stable, so actions within a year keep the order they were logged in on
+    every machine (NumPy's default sort orders ties by platform).
     """
     action_df = pd.DataFrame(actions)
     if action_df.empty:
         return action_df
-    action_df = action_df.sort_values("Year", ignore_index=True)
+    action_df = action_df.sort_values("Year", kind="stable", ignore_index=True)
     if "Breaks" in action_df.columns:
         action_df["Breaks"] = action_df["Breaks"].fillna(0).astype(int)
     if "Cause" in action_df.columns:
